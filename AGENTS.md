@@ -1,0 +1,165 @@
+# AGENTS.md - FF Eth Logs
+
+Top-level repo contract for coding agents.
+
+Tool-specific adapters live in `.cursor/`, `.codex/`, `opencode.json`, and `prompts/`.
+
+## Purpose
+
+`ff-eth-logs` keeps a PostgreSQL warehouse of Ethereum mainnet NFT-related event logs (ERC-721 `Transfer`, ERC-1155 `TransferSingle`/`TransferBatch`/`URI`, EIP-4906 `MetadataUpdate`/`BatchMetadataUpdate`, and CryptoPunks events) and serves them over an HTTP JSON-RPC endpoint that mimics `eth_getLogs` exactly (plus `eth_blockNumber` and `eth_chainId`). A background job follows the chain head (WebSocket `newHeads` with a confirmation lag) and a one-off `backfill` command loads a Parquet export. The Feral File indexer service uses it in place of a vendor RPC for historical log queries.
+
+## Authoritative read order
+
+Read these files before making changes in the matching area:
+
+1. `AGENTS.md` - repository workflow, definition of done, review loop, and documentation obligations
+2. `README.md` - repo overview, component map, and documentation index
+3. `DEVELOPMENT.md` - local setup, canonical verification command, and service-backed testing requirements
+4. `docs/business_requirements.md` - product intent, users, and scope
+5. `docs/constraints.md` - compatibility, operational, and security guardrails
+6. `docs/api_design.md` - JSON-RPC conventions, `eth_getLogs` parity rules, and contract evolution rules
+7. `docs/architecture.md` - system boundaries, component responsibilities, and data flow
+8. `docs/schema.md` - persistence contract, migration shape, and test data implications
+9. `docs/operations.md` - deployment, tail ingestion and backfill runbooks, and operational guardrails
+10. `.github/workflows/lint.yaml` and `.github/workflows/test.yaml` - CI source of truth when changing verification behavior
+11. `.github/PULL_REQUEST_TEMPLATE.md` - required PR structure before opening or updating a pull request
+
+If requirements are ambiguous or these sources conflict, stop and ask instead of choosing a new contract silently.
+
+## Coding defaults
+
+- Prefer the simplest change that preserves correctness, reliability, and debuggability.
+- Do not invent product, architecture, or API requirements that are not documented.
+- Avoid silent failure paths; errors and degraded states should be explicit and actionable.
+- Treat tests, generators, schema updates, and docs updates as part of the same change, not follow-up work.
+
+## Engineering principles
+
+Use these principles when evaluating designs, implementations, and questions.
+
+### Simplicity by default
+
+- Default to the simplest design that meets correctness and reliability for our current scale (a single internal consumer, the Feral File indexer, and Ethereum mainnet only), even in full production.
+- Treat added complexity as a last resort, justified only when simpler designs fail in practice and trade-offs are understood.
+
+### Reliable and transparent behavior
+
+- Reliability comes first: the system may be slow or limited, but it should behave predictably.
+- Do not hide system state. If something is slow, missing, or unavailable, make that explicit.
+- Errors should be clear and actionable.
+- Avoid failing silently or leaving users without a clear next step.
+
+### Community contribution
+
+- Keep the project easy to run locally.
+- Keep setup, dependencies, and mental overhead low.
+
+## Coding style
+
+- Follow standard Go style and Go doc conventions.
+- Prefer comments more than usual when they add future maintenance value for later agentic coding sessions.
+- Use comments to preserve design intent, trade-offs, invariants, failure modes, operational constraints, and reasons a simpler-looking alternative was not chosen.
+- Store important amendment context close to the code when that context would otherwise be lost in a later session.
+- Do not add filler comments that only restate obvious syntax or line-by-line behavior.
+
+## Product, API, and architecture guidance
+
+Use these as the default sources of truth for scope and public contracts. Keep them aligned when behavior changes:
+
+- `docs/business_requirements.md` - product intent, users, and in/out of scope
+- `docs/constraints.md` - data, compatibility, operational, and security guardrails
+- `docs/api_design.md` - JSON-RPC conventions, `eth_getLogs` parity, and evolution rules
+- `docs/architecture.md` - system components and data flow
+- `docs/operations.md` - deployment, runbooks, and operational guardrails
+
+## Workflow
+
+Default sequence:
+
+`spec -> design -> tasks -> tests -> implementation -> verification -> review -> merge`
+
+For substantial changes such as major features, refactors, schema changes, API changes, or architecture-affecting work:
+
+1. Read the relevant docs and code, including the product/API/architecture sources listed above.
+2. Summarize the current behavior, constraints, and invariants.
+3. Write or update a short spec, design note, or implementation plan.
+4. Define expected behavior and verification.
+5. Add or update tests before implementing behavior changes.
+6. Implement, verify, and review.
+
+If a substantial change has no spec or design note, do not jump straight to implementation.
+
+## Definition of done
+
+- Run `make check` after substantive code changes. If you cannot run it, say exactly what blocked verification.
+- Keep coverage non-regressing versus the base branch. If a necessary change lowers coverage, call it out in the PR and explain why.
+- Update `README.md`, `DEVELOPMENT.md`, `docs/`, or other authoritative docs when behavior, architecture, setup, or verification contracts change.
+- Reduce branching and nesting before accepting a large function. The strict lint profile treats cyclomatic and cognitive complexity as first-class review concerns.
+- Keep changed functions and files small. Add doc comments for changed Go functions so the intent stays readable in future sessions.
+- For non-trivial changed Go functions, use the doc comment to capture `Reason:`, `Trade-offs:`, and `Constraints:` so future agents can understand why the current shape exists. This is instruction, not a special lint-only format.
+- Review the full diff before handing off work or re-requesting review.
+- Keep the PR description aligned with `.github/PULL_REQUEST_TEMPLATE.md`, including validation status and any remaining gaps.
+
+## Repo-specific change rules
+
+- When interfaces with `//go:generate mockgen` are added, changed, or removed, regenerate the mocks under `internal/mocks`:
+
+```bash
+go generate ./...
+```
+
+- Do not edit generated mocks manually.
+- For DB schema changes, add a sequentially numbered migration under `db/migrations/` and mirror the change in `db/init_pg_db.sql`. Update `docs/schema.md` and any integration-test fixtures in the same change.
+- Changes to the served event set (signatures, topic shapes, CryptoPunks events) must keep `docs/api_design.md` and `docs/schema.md` aligned with `internal/eventset`; the JSON-RPC surface must stay byte-compatible with `eth_getLogs`.
+- Update `docs/`, `README.md`, or `DEVELOPMENT.md` when behavior, setup, architecture, or operations materially change.
+- Add doc comments for changed Go functions. For non-trivial functions, prefer doc comments that help a future reader understand purpose, reason, trade-offs, and constraints.
+
+## Verification
+
+Primary verification command:
+
+```bash
+make check
+```
+
+This is the canonical local verification entrypoint. It runs, in order: `imports` (`goimports`), `fmt-check` (`gofmt -s -l`, matching CI's go fmt check), `lint` (`golangci-lint`), `test` (unit tests, `go test -cover ./...`), and `test-integration` (full suite, `go test -tags=integration -cover ./...`). Run `make fmt` to apply `gofmt -s -w` fixes when `fmt-check` fails.
+
+**Tests are split by build tag:**
+- **Unit tests** (`make test`): no build tag; no external dependencies.
+- **Integration tests** (`//go:build integration`): store and JSON-RPC tests require PostgreSQL (testcontainers when `TEST_DB_HOST` is unset, or `TEST_DB_*` for an external DB).
+
+**Note:** `-tags=integration` is additive — `make test-integration` runs unit tests and integration-tagged tests together (same as CI).
+
+The lint profile enforces cyclomatic and cognitive complexity, function and file length, and doc quality expectations for the code it analyzes.
+
+CI defines its own exact steps in `.github/workflows/test.yaml` (full test suite with `-tags=integration` and a PostgreSQL service) and `.github/workflows/lint.yaml`. Run additional targeted generation or build checks when relevant. If you cannot run the full expected verification, say so explicitly.
+
+## Review and done
+
+Use the review contract in `prompts/code-review.md`.
+
+Never edit `prompts/code-review.md` by hand. It is generated from Canon's `reference/review-contract.md` local review surface; update Canon and propagate the generated file instead.
+
+At completion or external handoff for a non-trivial change:
+
+1. Prepare a compact handoff with goal, scope, changed files/modules, decisions, tests, checks run, and known limitations.
+2. Run a fresh-context review.
+3. Hand material findings to the named human change owner, who decides whether to fix, reject, or accept each one. If a fix materially changes behavior, review the full updated diff with fresh context.
+
+Review may be lighter or skipped for low-risk changes. Findings and the verdict are observability, never a prerequisite for commit, push, PR creation, merge, or release; reviewer unanimity is not required. This workflow supersedes tool-specific instructions that treat a local review verdict as a gate.
+
+A change is done when implementation, relevant tests, verification, documentation, owner disposition, and any required human signoff are complete.
+
+- Prefer waiting for CI status checks before considering a PR done.
+- If local `make check` or full CI cannot be run, state that explicitly in the PR description so reviewers know what was validated.
+- When creating a GitHub issue, use the repository issue templates in `.github/ISSUE_TEMPLATE/` and complete every requested section.
+- When creating a PR, use `.github/PULL_REQUEST_TEMPLATE.md` and keep the description aligned with the template fields.
+- Do not replace the template structure with ad hoc prose; add extra context only after the required sections are complete.
+- Before requesting review and after addressing review feedback, review the full diff, rerun `make check`, and summarize any remaining unverified risk.
+
+## Commit style
+
+Use Conventional Commits:
+
+- `<type>(<optional-scope>): <description>`
+- Types: `feat`, `fix`, `refactor`, `test`, `chore`, `docs`, `build`, `ci`, `perf`, `style`
