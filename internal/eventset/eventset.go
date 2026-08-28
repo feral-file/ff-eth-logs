@@ -98,6 +98,11 @@ func IsWarehouseSignature(topic0 common.Hash) bool {
 // consumable by the indexer, and the backfill excluded them, so they are
 // dropped here. Constraints: keep this in lock-step with the BigQuery extract
 // WHERE clause in docs/probe_2026-08.md; any drift changes served results.
+//
+// One deliberate difference from the indexer: 4-topic TransferBatch logs are
+// stored although the indexer's ERC-1155 adapter skips them at parse time —
+// the extract kept them (2.0 M logs) and a consumer that wants batch
+// transfers should not need a re-export.
 func Keep(topics []common.Hash, address common.Address) bool {
 	if len(topics) == 0 {
 		return false
