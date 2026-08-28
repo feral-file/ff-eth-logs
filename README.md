@@ -34,7 +34,7 @@ make setup
 make quickstart
 ```
 
-This starts **PostgreSQL** (host port `5433`, schema from `db/init_pg_db.sql`) and **ff-eth-logs** (JSON-RPC on `http://localhost:8545`). A fresh warehouse is empty and starts ingesting at the chain head; history below it needs the backfill described in [docs/operations.md](docs/operations.md).
+This starts **PostgreSQL** (host port `5433`, schema from `db/init_pg_db.sql`) and **ff-eth-logs** (JSON-RPC on `http://localhost:8545`). A fresh warehouse is empty and starts ingesting at the chain head; it then serves only that tail (`coverage_start` in `/health`) and refuses history below it until the backfill described in [docs/operations.md](docs/operations.md) has run.
 
 **Configuration**: YAML config file plus `FF_ETH_LOGS_*` environment variables; environment values override the file. See [DEVELOPMENT.md](DEVELOPMENT.md).
 
@@ -52,8 +52,8 @@ The sample config and `config/.env` point at port `5432`; when the database is t
 ## JSON-RPC surface
 
 - `POST /` — JSON-RPC 2.0: `eth_getLogs`, `eth_blockNumber` (the warehouse head, not the chain tip), `eth_chainId`. Every other method returns `-32601`.
-- `GET /health` — `{"status":"ok","head":<block>,"empty":<bool>,"chain_id":1}`.
-- A filter must pin `topics[0]` to warehouse signatures and stay at or below the head; otherwise the reply is `-32000 out of warehouse scope: ...`, which a routing client treats as "ask the vendor".
+- `GET /health` — `{"status":"ok","head":<block>,"coverage_start":<block>,"empty":<bool>,"chain_id":1}`.
+- A filter must pin `topics[0]` to warehouse signatures (CryptoPunks signatures additionally to the CryptoPunks address) and stay inside `[coverage_start, head]`; otherwise the reply is `-32000 out of warehouse scope: ...`, which a routing client treats as "ask the vendor".
 
 ```bash
 curl -s -X POST -H 'content-type: application/json' http://localhost:8545 --data '{

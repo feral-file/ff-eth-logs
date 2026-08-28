@@ -25,6 +25,9 @@ type Store interface {
 // RunConfig is the runner's configuration.
 type RunConfig struct {
 	Config
+	// ChainID is the chain the warehouse stores; the provider must report it
+	// (eth_chainId) before a single block is written.
+	ChainID uint64
 	// StartBlock, when non-zero, overrides the cursor unconditionally — a
 	// deliberate rewind or a first run without a backfill. A start block
 	// further behind the head than MaxCatchupBlocks is a startup failure.
@@ -37,6 +40,9 @@ type RunConfig struct {
 // error occurs. Errors are fatal by design: the process exits and the
 // supervisor restarts it from the cursor (see Subscriber.Run).
 func Run(ctx context.Context, cfg RunConfig, client chain.EthClient, store Store) error {
+	if err := verifyChain(ctx, cfg.ChainID, client); err != nil {
+		return err
+	}
 	from, err := resolveStartBlock(ctx, cfg, client, store)
 	if err != nil {
 		return err
@@ -45,6 +51,21 @@ func Run(ctx context.Context, cfg RunConfig, client chain.EthClient, store Store
 		zap.Uint64("confirmationBlocks", cfg.ConfirmationBlocks), zap.Uint64("maxCatchupBlocks", cfg.MaxCatchupBlocks))
 	fetcher := NewFetcher(client, chain.RealClock{}, cfg.SpanCap)
 	return NewSubscriber(cfg.Config, client, fetcher, store).Run(ctx, from)
+}
+
+// verifyChain refuses to ingest from a provider on the wrong chain. Reason:
+// the endpoint is configuration, and a testnet URL would otherwise fill the
+// warehouse with blocks the API then serves as mainnet (eth_chainId reports
+// the configured id, not the provider's).
+func verifyChain(ctx context.Context, want uint64, client chain.EthClient) error {
+	got, err := client.ChainID(ctx)
+	if err != nil {
+		return fmt.Errorf("read provider chain id: %w", err)
+	}
+	if got != want {
+		return fmt.Errorf("provider chain id %d does not match configured ethereum.chain_id %d", got, want)
+	}
+	return nil
 }
 
 // resolveStartBlock mirrors the indexer: an explicit start_block wins; else

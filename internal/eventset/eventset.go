@@ -90,6 +90,13 @@ func IsWarehouseSignature(topic0 common.Hash) bool {
 	return ok
 }
 
+// IsCryptoPunksSignature reports whether topic0 is one of the three
+// address-scoped CryptoPunks signatures.
+func IsCryptoPunksSignature(topic0 common.Hash) bool {
+	_, ok := punkSignatures[topic0]
+	return ok
+}
+
 // Keep reports whether a log fetched by the ingestion filter is stored.
 //
 // Reason: the ingestion filter is topic0-only, so it also returns ERC-20

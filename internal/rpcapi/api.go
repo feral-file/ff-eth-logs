@@ -16,9 +16,9 @@ import (
 	"github.com/feral-file/ff-eth-logs/internal/logstore"
 )
 
-// Warehouse is what the API reads: the head and the two lookups.
+// Warehouse is what the API reads: the covered interval and the two lookups.
 type Warehouse interface {
-	Head(ctx context.Context) (uint64, bool, error)
+	Coverage(ctx context.Context) (logstore.Coverage, bool, error)
 	FilterLogs(ctx context.Context, q logstore.Query, limit int) ([]types.Log, error)
 	BlockByHash(ctx context.Context, hash common.Hash) (logstore.Block, bool, error)
 }
@@ -48,8 +48,9 @@ type API struct {
 func NewAPI(store Warehouse, cfg Config) *API { return &API{store: store, cfg: cfg} }
 
 // ScopeError is returned for a request the warehouse cannot answer exactly:
-// a block above the head, a signature outside the event set, or a filter
-// without a topic0. It carries JSON-RPC code -32000 (geth's default for
+// a block outside the covered interval, a signature outside the event set, a
+// filter without a topic0, or a CryptoPunks signature not pinned to the
+// CryptoPunks contract. It carries JSON-RPC code -32000 (geth's default for
 // handler errors) and a message that deliberately avoids the words a
 // range-cap classifier keys on ("range", "limit", "too many"), so a client
 // treats it as out-of-scope rather than as a window to halve.
@@ -69,14 +70,14 @@ func (a *API) ChainId() *hexutil.Big { //nolint:revive // geth method naming map
 // block whose logs are fully stored — not the chain tip. A client that needs
 // the tip must ask the chain; this is the split point for a routing client.
 func (a *API) BlockNumber(ctx context.Context) (hexutil.Uint64, error) {
-	head, ok, err := a.store.Head(ctx)
+	cov, ok, err := a.store.Coverage(ctx)
 	if err != nil {
 		return 0, err
 	}
 	if !ok {
 		return 0, &ScopeError{Reason: "warehouse is empty"}
 	}
-	return hexutil.Uint64(head), nil
+	return hexutil.Uint64(cov.Head), nil
 }
 
 // GetLogs implements eth_getLogs with go-ethereum's semantics on the stored
@@ -85,17 +86,17 @@ func (a *API) GetLogs(ctx context.Context, crit FilterCriteria) ([]*types.Log, e
 	if len(crit.Topics) > maxTopics {
 		return nil, errExceedMaxTopics
 	}
-	if err := checkTopicScope(crit.Topics); err != nil {
+	if err := checkTopicScope(crit.Topics, crit.Addresses); err != nil {
 		return nil, err
 	}
-	head, ok, err := a.store.Head(ctx)
+	cov, ok, err := a.store.Coverage(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
 		return nil, &ScopeError{Reason: "warehouse is empty"}
 	}
-	q, empty, err := a.resolveRange(ctx, crit, head)
+	q, empty, err := a.resolveRange(ctx, crit, cov)
 	if err != nil || empty {
 		return []*types.Log{}, err
 	}
@@ -118,25 +119,48 @@ func (a *API) GetLogs(ctx context.Context, crit FilterCriteria) ([]*types.Log, e
 	return out, nil
 }
 
-// checkTopicScope enforces the one rule the warehouse adds to geth's: the
-// filter must pin topic0 to warehouse signatures. Without it the answer would
-// silently omit every other event on the chain.
-func checkTopicScope(topics [][]common.Hash) error {
+// checkTopicScope enforces the rules the warehouse adds to geth's: the
+// filter must pin topic0 to warehouse signatures (otherwise the answer would
+// silently omit every other event on the chain), and a CryptoPunks signature
+// must be pinned to the CryptoPunks contract, because the same signatures
+// from any other address are not stored (eventset.Keep) — an unpinned filter
+// would return a subset a node would not.
+func checkTopicScope(topics [][]common.Hash, addresses []common.Address) error {
 	if len(topics) == 0 || len(topics[0]) == 0 {
 		return &ScopeError{Reason: "filter must name at least one warehouse event signature in topics[0]"}
 	}
+	punks := false
 	for _, sig := range topics[0] {
 		if !eventset.IsWarehouseSignature(sig) {
 			return &ScopeError{Reason: fmt.Sprintf("topic0 %s is not a warehouse event signature", sig.Hex())}
 		}
+		punks = punks || eventset.IsCryptoPunksSignature(sig)
+	}
+	if punks && !onlyCryptoPunks(addresses) {
+		return &ScopeError{Reason: fmt.Sprintf("CryptoPunks signatures are stored only for %s; restrict address to it", eventset.CryptoPunksAddress.Hex())}
 	}
 	return nil
 }
 
+// onlyCryptoPunks reports whether addresses is non-empty and every entry is
+// the CryptoPunks contract.
+func onlyCryptoPunks(addresses []common.Address) bool {
+	if len(addresses) == 0 {
+		return false
+	}
+	for _, a := range addresses {
+		if a != eventset.CryptoPunksAddress {
+			return false
+		}
+	}
+	return true
+}
+
 // resolveRange turns the criteria into a concrete block range, following
-// geth's GetLogs/Filter.Logs order of checks, then bounds it by the head.
-// empty=true reproduces geth returning [] for begin > end after resolution.
-func (a *API) resolveRange(ctx context.Context, crit FilterCriteria, head uint64) (logstore.Query, bool, error) {
+// geth's GetLogs/Filter.Logs order of checks, then bounds it by the covered
+// interval. empty=true reproduces geth returning [] for begin > end after
+// resolution.
+func (a *API) resolveRange(ctx context.Context, crit FilterCriteria, cov logstore.Coverage) (logstore.Query, bool, error) {
 	q := logstore.Query{Addresses: crit.Addresses, Topics: crit.Topics}
 	if crit.BlockHash != nil {
 		block, ok, err := a.store.BlockByHash(ctx, *crit.BlockHash)
@@ -162,16 +186,19 @@ func (a *API) resolveRange(ctx context.Context, crit FilterCriteria, head uint64
 	if begin == rpc.PendingBlockNumber.Int64() || end == rpc.PendingBlockNumber.Int64() {
 		return q, false, errPendingLogsUnsupported
 	}
-	from, err := resolveSpecial(begin, head)
+	from, err := resolveSpecial(begin, cov.Head)
 	if err != nil {
 		return q, false, err
 	}
-	to, err := resolveSpecial(end, head)
+	to, err := resolveSpecial(end, cov.Head)
 	if err != nil {
 		return q, false, err
 	}
-	if from > head || to > head {
-		return q, false, &ScopeError{Reason: fmt.Sprintf("blocks %d-%d extend above the warehouse head %d", from, to, head)}
+	if from > cov.Head || to > cov.Head {
+		return q, false, &ScopeError{Reason: fmt.Sprintf("blocks %d-%d extend above the warehouse head %d", from, to, cov.Head)}
+	}
+	if from < cov.Start && from <= to {
+		return q, false, &ScopeError{Reason: fmt.Sprintf("blocks %d-%d extend below the warehouse coverage start %d", from, to, cov.Start)}
 	}
 	q.FromBlock, q.ToBlock = from, to
 	return q, from > to, nil

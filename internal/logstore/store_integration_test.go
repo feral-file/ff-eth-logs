@@ -36,7 +36,7 @@ func TestWriteRangeCursorAndRewind(t *testing.T) {
 		{BlockNumber: 12, Index: 3, Address: common.HexToAddress("0x2"), Topics: []common.Hash{common.HexToHash("0xa"), common.HexToHash("0xb")}, Data: []byte{1, 2}, TxHash: common.HexToHash("0xf2"), TxIndex: 7},
 	}
 	require.NoError(t, s.WriteRange(ctx, 10, 12, []Block{blockAt(10), blockAt(11), blockAt(12)}, logs))
-	head, ok, err := s.Head(ctx)
+	head, ok, err := s.Cursor(ctx)
 	require.NoError(t, err)
 	assert.True(t, ok)
 	assert.Equal(t, uint64(12), head)
@@ -75,6 +75,7 @@ func TestWriteRangeCursorAndRewind(t *testing.T) {
 	assert.True(t, found)
 	assert.Equal(t, blockAt(10), b)
 	assert.Error(t, s.Rewind(ctx, 10), "cannot rewind forward or to the cursor itself")
+	assert.ErrorIs(t, s.Rewind(ctx, 9), ErrCoverageGap, "rewinding below the coverage start would empty the warehouse")
 
 	// The limit is a hard error, never a truncated answer.
 	require.NoError(t, s.WriteRange(ctx, 11, 12, []Block{blockAt(11), blockAt(12)}, logs))
@@ -174,4 +175,74 @@ func TestFilterLogsMatchesGethSemantics(t *testing.T) {
 		}
 		require.Equal(t, want, got, "query %+v", q)
 	}
+}
+
+// TestCoverageStaysContiguous pins the rule that makes the coverage interval
+// trustworthy: a write must touch the existing interval, and the interval
+// grows to include it — so a start_block that jumps ahead cannot leave a hole
+// the API would then serve as "no logs".
+func TestCoverageStaysContiguous(t *testing.T) {
+	ctx := context.Background()
+	s := NewFromPool(testdb.Open(t))
+
+	_, ok, err := s.Coverage(ctx)
+	require.NoError(t, err)
+	assert.False(t, ok)
+
+	require.NoError(t, s.WriteRange(ctx, 100, 102, []Block{blockAt(100), blockAt(101), blockAt(102)}, nil))
+	cov, ok, err := s.Coverage(ctx)
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, Coverage{Start: 100, Head: 102}, cov)
+
+	// Gap above (104 > head+1) and gap below (to+1 < start) are refused.
+	assert.ErrorIs(t, s.WriteRange(ctx, 104, 104, []Block{blockAt(104)}, nil), ErrCoverageGap)
+	assert.ErrorIs(t, s.WriteRange(ctx, 90, 98, blocksFor(90, 98), nil), ErrCoverageGap)
+
+	// Extending on either side and replaying inside all work.
+	require.NoError(t, s.WriteRange(ctx, 103, 103, []Block{blockAt(103)}, nil))
+	require.NoError(t, s.WriteRange(ctx, 97, 99, blocksFor(97, 99), nil))
+	require.NoError(t, s.WriteRange(ctx, 100, 101, blocksFor(100, 101), nil))
+	cov, _, err = s.Coverage(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, Coverage{Start: 97, Head: 103}, cov)
+
+	// A rewind keeps the start.
+	require.NoError(t, s.Rewind(ctx, 100))
+	cov, _, err = s.Coverage(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, Coverage{Start: 97, Head: 100}, cov)
+}
+
+// TestWriteRangeCreatesPartitionOnRollover pins that a batch crossing the
+// last pre-created partition (p039 ends at 40,000,000) creates the next one
+// instead of failing the COPY.
+func TestWriteRangeCreatesPartitionOnRollover(t *testing.T) {
+	ctx := context.Background()
+	pool := testdb.Open(t)
+	s := NewFromPool(pool)
+	_, _ = pool.Exec(ctx, "DROP TABLE IF EXISTS eth_logs_p040")
+
+	from, to := uint64(39_999_999), uint64(40_000_001)
+	logs := []types.Log{
+		{BlockNumber: 39_999_999, Address: common.HexToAddress("0x1"), Topics: []common.Hash{common.HexToHash("0xa")}, Data: []byte{}},
+		{BlockNumber: 40_000_000, Address: common.HexToAddress("0x1"), Topics: []common.Hash{common.HexToHash("0xa")}, Data: []byte{}},
+	}
+	require.NoError(t, s.WriteRange(ctx, from, to, blocksFor(from, to), logs))
+
+	var partitionRows int
+	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM eth_logs_p040`).Scan(&partitionRows))
+	assert.Equal(t, 1, partitionRows)
+	got, err := s.FilterLogs(ctx, Query{FromBlock: from, ToBlock: to}, 0)
+	require.NoError(t, err)
+	assert.Len(t, got, 2)
+	assert.Equal(t, "eth_logs_p040", PartitionName(40_000_000))
+}
+
+func blocksFor(from, to uint64) []Block {
+	out := make([]Block, 0, to-from+1)
+	for n := from; n <= to; n++ {
+		out = append(out, blockAt(n))
+	}
+	return out
 }

@@ -32,7 +32,7 @@ func TestLoadDefaultsAndEnvOverride(t *testing.T) {
 
 func TestValidate(t *testing.T) {
 	base := func() *Config {
-		return &Config{Database: DatabaseConfig{Host: "h"}, Ethereum: EthereumConfig{WebSocketURL: "wss://x", IngestionEnabled: true, ConfirmationBlocks: 2, MaxCatchupBlocks: 100}}
+		return &Config{Database: DatabaseConfig{Host: "h"}, Ethereum: EthereumConfig{WebSocketURL: "wss://x", ChainID: 1, IngestionEnabled: true, ConfirmationBlocks: 2, MaxCatchupBlocks: 100}}
 	}
 	require.NoError(t, Validate(base()))
 
@@ -49,6 +49,10 @@ func TestValidate(t *testing.T) {
 	c = base()
 	c.Ethereum.ConfirmationBlocks = 100
 	assert.ErrorContains(t, Validate(c), "must be below")
+
+	c = base()
+	c.Ethereum.ChainID = 0
+	assert.ErrorContains(t, Validate(c), "chain_id")
 
 	c = base()
 	c.RPC.MaxResults = -1

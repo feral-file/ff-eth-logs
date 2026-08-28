@@ -78,16 +78,16 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 }
 
-// health reports the warehouse head. It is 200 whenever the database
+// health reports the covered interval. It is 200 whenever the database
 // answers; lag is for dashboards, not for the healthcheck, because a long
 // catch-up is a healthy state.
 func (a *API) health(w http.ResponseWriter, r *http.Request) {
-	head, ok, err := a.store.Head(r.Context())
+	cov, ok, err := a.store.Coverage(r.Context())
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "error", "error": err.Error()})
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "head": head, "empty": !ok, "chain_id": a.cfg.ChainID})
+	_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "head": cov.Head, "coverage_start": cov.Start, "empty": !ok, "chain_id": a.cfg.ChainID})
 }

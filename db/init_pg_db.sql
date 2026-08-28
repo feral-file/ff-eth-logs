@@ -48,10 +48,15 @@ CREATE INDEX IF NOT EXISTS eth_logs_t2 ON eth_logs (topic2, block_number) WHERE 
 CREATE INDEX IF NOT EXISTS eth_logs_t3 ON eth_logs (topic3, block_number) WHERE topic3 IS NOT NULL;
 CREATE INDEX IF NOT EXISTS eth_logs_addr ON eth_logs (address, block_number);
 
--- The warehouse head. Exactly one row; written in the same transaction as
--- the blocks and logs it accounts for, so it is never ahead of the data.
+-- The covered interval [coverage_start, block_number]: every block in it has
+-- its eth_blocks row and every warehouse log. Exactly one row; written in the
+-- same transaction as the blocks and logs it accounts for, so it is never
+-- ahead of the data. The API refuses ranges outside it (a fresh database
+-- that starts at the chain tip must not answer genesis..head with []).
 CREATE TABLE IF NOT EXISTS ingest_cursor (
-    id           smallint PRIMARY KEY CHECK (id = 1),
-    block_number bigint NOT NULL,
-    updated_at   timestamptz NOT NULL DEFAULT now()
+    id             smallint PRIMARY KEY CHECK (id = 1),
+    coverage_start bigint NOT NULL,
+    block_number   bigint NOT NULL,   -- the head
+    updated_at     timestamptz NOT NULL DEFAULT now(),
+    CHECK (coverage_start <= block_number)
 );

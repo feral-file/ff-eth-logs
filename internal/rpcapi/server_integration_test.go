@@ -55,7 +55,7 @@ func TestServerRoundTripWithEthclient(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), chainID.Int64())
 
-	got, err := client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(0), ToBlock: big.NewInt(6),
+	got, err := client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(5), ToBlock: big.NewInt(6),
 		Topics: [][]common.Hash{{eventset.Transfer}, nil, {owner}}})
 	require.NoError(t, err)
 	require.Len(t, got, 1)
@@ -64,21 +64,26 @@ func TestServerRoundTripWithEthclient(t *testing.T) {
 	assert.Equal(t, want, got[0])
 
 	// A 4-position filter excludes the 3-topic log, as on a node.
-	got, err = client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(0), ToBlock: big.NewInt(6),
+	got, err = client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(5), ToBlock: big.NewInt(6),
 		Topics: [][]common.Hash{{eventset.Transfer}, nil, nil, nil}})
 	require.NoError(t, err)
 	assert.Len(t, got, 1)
 
 	// max_results=1: two matches produce the Infura-style error.
-	_, err = client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(0), ToBlock: big.NewInt(6), Topics: [][]common.Hash{{eventset.Transfer}}})
+	_, err = client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(5), ToBlock: big.NewInt(6), Topics: [][]common.Hash{{eventset.Transfer}}})
 	require.EqualError(t, err, "query returned more than 1 results")
 
 	// Scope errors reach the client with code -32000.
-	_, err = client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(0), ToBlock: big.NewInt(7), Topics: [][]common.Hash{{eventset.Transfer}}})
+	_, err = client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(5), ToBlock: big.NewInt(7), Topics: [][]common.Hash{{eventset.Transfer}}})
 	var rpcErr rpc.Error
 	require.ErrorAs(t, err, &rpcErr)
 	assert.Equal(t, -32000, rpcErr.ErrorCode())
-	assert.Equal(t, "out of warehouse scope: blocks 0-7 extend above the warehouse head 6", rpcErr.Error())
+	assert.Equal(t, "out of warehouse scope: blocks 5-7 extend above the warehouse head 6", rpcErr.Error())
+
+	// History below the covered interval is refused, not answered with [].
+	_, err = client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(0), ToBlock: big.NewInt(6), Topics: [][]common.Hash{{eventset.Transfer}}})
+	require.ErrorAs(t, err, &rpcErr)
+	assert.Equal(t, "out of warehouse scope: blocks 0-6 extend below the warehouse coverage start 5", rpcErr.Error())
 
 	// blockHash queries resolve through eth_blocks.
 	h := blocks[1].Hash
@@ -116,4 +121,5 @@ func TestServerRoundTripWithEthclient(t *testing.T) {
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&health))
 	assert.Equal(t, "ok", health["status"])
 	assert.Equal(t, float64(6), health["head"])
+	assert.Equal(t, float64(5), health["coverage_start"])
 }

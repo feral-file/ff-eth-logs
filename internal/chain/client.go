@@ -47,6 +47,8 @@ type EthClient interface {
 	BlockReceipts(ctx context.Context, number uint64) ([]*types.Receipt, error)
 	// BlockNumber is eth_blockNumber.
 	BlockNumber(ctx context.Context) (uint64, error)
+	// ChainID is eth_chainId.
+	ChainID(ctx context.Context) (uint64, error)
 	// Close closes the connection.
 	Close()
 }
@@ -257,6 +259,23 @@ func (c *RealEthClient) BlockNumber(ctx context.Context) (uint64, error) {
 		return err
 	}, "BlockNumber")
 	return n, err
+}
+
+// ChainID is eth_chainId with retry logic.
+func (c *RealEthClient) ChainID(ctx context.Context) (uint64, error) {
+	var id uint64
+	err := c.executeWithRetry(ctx, func() error {
+		n, err := c.client.ChainID(ctx)
+		if err != nil {
+			return err
+		}
+		if !n.IsUint64() {
+			return backoff.Permanent(fmt.Errorf("chain id %s does not fit uint64", n))
+		}
+		id = n.Uint64()
+		return nil
+	}, "ChainID")
+	return id, err
 }
 
 // Close closes the underlying connection.

@@ -110,7 +110,7 @@ gcloud storage cp -r gs://eth-logs/eth-log-warehouse/v1 ./data/
 go run ./cmd/ff-eth-logs backfill -config config/config.yaml -dir ./data/v1
 ```
 
-`-stage` selects one stage instead of `all`: `prepare` (drop the secondary indexes), `logs` (COPY each `logs/part=NNN/` into its partition, sorted by `(block_number, log_index)`), `blocks` (COPY `blocks/*.parquet` into `eth_blocks`), `finish` (recreate the indexes, `ANALYZE`, set the cursor to the newest block). Every stage is idempotent: `logs` skips a partition that already has rows, `blocks` skips when `eth_blocks` is non-empty, so re-running after a failure resumes where it stopped.
+`-stage` selects one stage instead of `all`: `prepare` (drop the secondary indexes), `logs` (COPY each `logs/part=NNN/` into its partition, sorted by `(block_number, log_index)`), `blocks` (COPY `blocks/*.parquet` into `eth_blocks`), `finish` (verify every export directory and block is loaded, recreate the indexes, `ANALYZE`, publish coverage `[oldest, newest]`; refuses and leaves the cursor unset when the load is incomplete). Every stage is idempotent: `logs` skips a partition that already has rows, `blocks` skips when `eth_blocks` is non-empty, so re-running after a failure resumes where it stopped.
 
 For a quick local run use the one-day rehearsal export instead: `gs://eth-logs/eth-log-warehouse/v0-rehearsal` has the same layout with the logs of 2026-08-20 (72,430 logs, blocks 25,792,602–25,799,779) and the complete `blocks/` export. After `finish` the cursor is the newest block in `eth_blocks`, so the warehouse reports head 25,842,829 and answers `[]` for any in-scope range outside that day.
 
@@ -181,10 +181,10 @@ Coverage policy is non-regression versus the base branch; document any necessary
 
 ```bash
 curl -s http://localhost:8545/health
-# {"status":"ok","head":25842829,"empty":false,"chain_id":1}
+# {"status":"ok","head":25842829,"coverage_start":0,"empty":false,"chain_id":1}
 ```
 
-`head` is the cursor (last fully written block). `empty: true` means no cursor row yet (fresh database, backfill not finished). A database failure returns 503 with `{"status":"error","error":"..."}`. The endpoint is 200 during a long catch-up — lag is not a health failure.
+`head` and `coverage_start` are the covered interval (the API answers only inside it). `empty: true` means no cursor row yet (fresh database, backfill not finished). A database failure returns 503 with `{"status":"error","error":"..."}`. The endpoint is 200 during a long catch-up — lag is not a health failure.
 
 ### Logs
 

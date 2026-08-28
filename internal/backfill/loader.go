@@ -10,7 +10,8 @@
 //	         into eth_logs so the heap is chain-ordered; skip directories whose
 //	         range already has rows
 //	blocks   COPY blocks-*.parquet into eth_blocks (skip if already populated)
-//	finish   recreate the indexes, ANALYZE, set the cursor to the newest block
+//	finish   verify every directory and block is loaded, recreate the indexes,
+//	         ANALYZE, publish coverage [oldest block, newest block]
 //
 // Sorting happens in Postgres (external sort, bounded by work_mem) because
 // the busiest 1 M-block partition holds ~60 M rows — far too many to sort in
@@ -60,9 +61,21 @@ func (l *Loader) Prepare(ctx context.Context) error {
 	return nil
 }
 
-// Finish recreates the indexes, analyzes, and sets the cursor to the newest
-// loaded block so tail ingestion resumes right after the export.
+// Finish verifies the load, recreates the indexes, analyzes, and publishes
+// coverage [oldest block, newest block] so tail ingestion resumes right after
+// the export and the API starts answering.
+//
+// Reason: the stages can be run individually and in any order, so the cursor
+// must not be derived from whatever happens to be in eth_blocks. Finish
+// re-derives the expected row count of every export directory from the
+// Parquet footers and compares it with the database, and checks eth_blocks
+// is one contiguous run, before it writes the cursor row. Until then the API
+// reports the warehouse as empty rather than serving a partial history.
 func (l *Loader) Finish(ctx context.Context) error {
+	cov, err := l.verifyLoaded(ctx)
+	if err != nil {
+		return fmt.Errorf("backfill is not complete, cursor not set: %w", err)
+	}
 	for _, idx := range logstore.SecondaryIndexes {
 		start := time.Now()
 		if _, err := l.pool.Exec(ctx, idx.DDL); err != nil && !isDuplicateRelation(err) {
@@ -75,18 +88,94 @@ func (l *Loader) Finish(ctx context.Context) error {
 			return fmt.Errorf("analyze %s: %w", table, err)
 		}
 	}
-	var head *int64
-	if err := l.pool.QueryRow(ctx, `SELECT MAX(number) FROM eth_blocks`).Scan(&head); err != nil {
-		return fmt.Errorf("read newest block: %w", err)
-	}
-	if head == nil {
-		return errors.New("no blocks loaded; run the blocks stage first")
-	}
-	if err := logstore.NewFromPool(l.pool).SetCursor(ctx, uint64(*head)); err != nil { //nolint:gosec // non-negative
+	if err := logstore.NewFromPool(l.pool).SetCoverage(ctx, cov); err != nil {
 		return err
 	}
-	logger.InfoCtx(ctx, "Backfill finished; cursor set", zap.Int64("head", *head))
+	logger.InfoCtx(ctx, "Backfill finished; coverage published", zap.Uint64("start", cov.Start), zap.Uint64("head", cov.Head))
 	return nil
+}
+
+// verifyLoaded checks that eth_blocks is one contiguous run and that every
+// logs/part=NNN directory's rows are in the database, returning the coverage
+// to publish. Row counts come from the Parquet footers, so the check is exact
+// without re-reading the data.
+func (l *Loader) verifyLoaded(ctx context.Context) (logstore.Coverage, error) {
+	var lo, hi, n *int64
+	if err := l.pool.QueryRow(ctx, `SELECT MIN(number), MAX(number), COUNT(*) FROM eth_blocks`).Scan(&lo, &hi, &n); err != nil {
+		return logstore.Coverage{}, fmt.Errorf("read blocks: %w", err)
+	}
+	if lo == nil {
+		return logstore.Coverage{}, errors.New("no blocks loaded; run the blocks stage first")
+	}
+	if *n != *hi-*lo+1 {
+		return logstore.Coverage{}, fmt.Errorf("eth_blocks is not contiguous: %d rows for blocks %d-%d", *n, *lo, *hi)
+	}
+	parts, err := filepath.Glob(filepath.Join(l.dir, "logs", "part=*"))
+	if err != nil {
+		return logstore.Coverage{}, err
+	}
+	if len(parts) == 0 {
+		return logstore.Coverage{}, fmt.Errorf("no logs/part=* directories under %s", l.dir)
+	}
+	for _, dir := range parts {
+		if err := l.verifyPart(ctx, dir, uint64(*hi)); err != nil { //nolint:gosec // non-negative
+			return logstore.Coverage{}, err
+		}
+	}
+	return logstore.Coverage{Start: uint64(*lo), Head: uint64(*hi)}, nil //nolint:gosec // non-negative
+}
+
+// verifyPart compares one export directory's footer row count with the rows
+// stored in its partition range, and checks no log sits above the newest block.
+func (l *Loader) verifyPart(ctx context.Context, dir string, newestBlock uint64) error {
+	part, err := strconv.ParseUint(strings.TrimPrefix(filepath.Base(dir), "part="), 10, 64)
+	if err != nil {
+		return fmt.Errorf("part directory %s: %w", dir, err)
+	}
+	files, err := parquetFiles(dir)
+	if err != nil {
+		return err
+	}
+	var expected int64
+	for _, file := range files {
+		n, err := parquetRowCount(file)
+		if err != nil {
+			return fmt.Errorf("%s: %w", file, err)
+		}
+		expected += n
+	}
+	lo := part * logstore.PartitionBlocks
+	var got int64
+	var maxBlock *int64
+	if err := l.pool.QueryRow(ctx, `SELECT COUNT(*), MAX(block_number) FROM eth_logs WHERE block_number BETWEEN $1 AND $2`,
+		int64(lo), int64(lo+logstore.PartitionBlocks-1)).Scan(&got, &maxBlock); err != nil { //nolint:gosec // fits int64
+		return fmt.Errorf("count partition %d: %w", part, err)
+	}
+	if got != expected {
+		return fmt.Errorf("part %03d has %d rows in the database, export has %d; run the logs stage", part, got, expected)
+	}
+	if maxBlock != nil && uint64(*maxBlock) > newestBlock { //nolint:gosec // non-negative
+		return fmt.Errorf("part %03d has logs at block %d above the newest loaded block %d", part, *maxBlock, newestBlock)
+	}
+	return nil
+}
+
+// parquetRowCount reads a file's row count from its footer.
+func parquetRowCount(path string) (int64, error) {
+	f, err := os.Open(path) //nolint:gosec // operator-supplied export directory
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = f.Close() }()
+	st, err := f.Stat()
+	if err != nil {
+		return 0, err
+	}
+	pf, err := parquet.OpenFile(f, st.Size())
+	if err != nil {
+		return 0, fmt.Errorf("open parquet: %w", err)
+	}
+	return pf.NumRows(), nil
 }
 
 func isDuplicateRelation(err error) bool {

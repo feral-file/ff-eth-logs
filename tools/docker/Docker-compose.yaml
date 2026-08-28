@@ -12,8 +12,9 @@ services:
       POSTGRES_PASSWORD: ${FF_ETH_LOGS_DATABASE_PASSWORD:-postgres}
       POSTGRES_DB: ${FF_ETH_LOGS_DATABASE_DBNAME:-ff_eth_logs}
     ports:
-      # 5433 by default so it can run next to an indexer dev database on 5432.
-      - "${FF_ETH_LOGS_DB_HOST_PORT:-5433}:5432"
+      # Loopback only: the database has well-known dev credentials. 5433 by
+      # default so it can run next to an indexer dev database on 5432.
+      - "127.0.0.1:${FF_ETH_LOGS_DB_HOST_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql
       - ../../db/init_pg_db.sql:/docker-entrypoint-initdb.d/init_db.sql:ro
@@ -46,7 +47,9 @@ services:
       - FF_ETH_LOGS_DATABASE_HOST=postgres
       - FF_ETH_LOGS_DATABASE_PORT=5432
     ports:
-      - "${FF_ETH_LOGS_SERVER_PORT:-8545}:8545"
+      # Loopback only: the JSON-RPC API has no authentication by design
+      # (private network in production).
+      - "127.0.0.1:${FF_ETH_LOGS_SERVER_PORT:-8545}:8545"
     networks:
       - ff-eth-logs-network
     restart: unless-stopped

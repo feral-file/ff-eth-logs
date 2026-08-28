@@ -19,6 +19,7 @@ import (
 // fakeWarehouse records the query the API resolved and returns canned logs.
 type fakeWarehouse struct {
 	head    uint64
+	start   uint64
 	empty   bool
 	headErr error
 	logs    []types.Log
@@ -28,8 +29,8 @@ type fakeWarehouse struct {
 	gotLim  int
 }
 
-func (f *fakeWarehouse) Head(context.Context) (uint64, bool, error) {
-	return f.head, !f.empty, f.headErr
+func (f *fakeWarehouse) Coverage(context.Context) (logstore.Coverage, bool, error) {
+	return logstore.Coverage{Start: f.start, Head: f.head}, !f.empty, f.headErr
 }
 
 func (f *fakeWarehouse) FilterLogs(_ context.Context, q logstore.Query, limit int) ([]types.Log, error) {
@@ -128,6 +129,58 @@ func TestGetLogs_ScopeErrors(t *testing.T) {
 	require.ErrorAs(t, err, &scope)
 	_, err = api.BlockNumber(ctx)
 	require.ErrorAs(t, err, &scope)
+}
+
+// TestGetLogs_BelowCoverageStart pins that a warehouse holding only a tail
+// (fresh database ingesting from the tip) refuses history it never loaded
+// instead of answering [] — the routing client must go to the vendor.
+func TestGetLogs_BelowCoverageStart(t *testing.T) {
+	ctx := context.Background()
+	wh := &fakeWarehouse{start: 90, head: 100}
+	api := NewAPI(wh, Config{ChainID: 1})
+
+	var scope *ScopeError
+	_, err := api.GetLogs(ctx, transferCrit(0, 100))
+	require.ErrorAs(t, err, &scope)
+	assert.Equal(t, "out of warehouse scope: blocks 0-100 extend below the warehouse coverage start 90", err.Error())
+
+	_, err = api.GetLogs(ctx, transferCrit(rpc.EarliestBlockNumber.Int64(), 95))
+	require.ErrorAs(t, err, &scope, "earliest resolves to 0, below coverage")
+
+	_, err = api.GetLogs(ctx, transferCrit(90, 100))
+	require.NoError(t, err)
+	assert.Equal(t, uint64(90), wh.gotQ.FromBlock)
+
+	// A range that is empty after resolution stays [] rather than an error.
+	logs, err := api.GetLogs(ctx, FilterCriteria{FromBlock: big.NewInt(50), ToBlock: big.NewInt(rpc.EarliestBlockNumber.Int64()), Topics: [][]common.Hash{{eventset.Transfer}}})
+	require.NoError(t, err)
+	assert.Empty(t, logs)
+}
+
+// TestGetLogs_CryptoPunksMustPinAddress pins that a CryptoPunks signature is
+// only servable when the address selector is exactly the CryptoPunks
+// contract: the same signatures from other contracts are not stored.
+func TestGetLogs_CryptoPunksMustPinAddress(t *testing.T) {
+	ctx := context.Background()
+	wh := &fakeWarehouse{head: 100}
+	api := NewAPI(wh, Config{ChainID: 1})
+	punks := [][]common.Hash{{eventset.PunkTransfer, eventset.Transfer}}
+	other := common.HexToAddress("0x1")
+
+	var scope *ScopeError
+	_, err := api.GetLogs(ctx, FilterCriteria{FromBlock: big.NewInt(1), ToBlock: big.NewInt(2), Topics: punks})
+	require.ErrorAs(t, err, &scope)
+	assert.Contains(t, err.Error(), "CryptoPunks signatures are stored only for")
+
+	_, err = api.GetLogs(ctx, FilterCriteria{FromBlock: big.NewInt(1), ToBlock: big.NewInt(2), Topics: punks, Addresses: []common.Address{eventset.CryptoPunksAddress, other}})
+	require.ErrorAs(t, err, &scope)
+
+	_, err = api.GetLogs(ctx, FilterCriteria{FromBlock: big.NewInt(1), ToBlock: big.NewInt(2), Topics: punks, Addresses: []common.Address{eventset.CryptoPunksAddress}})
+	require.NoError(t, err)
+
+	// Standard signatures need no address pin.
+	_, err = api.GetLogs(ctx, FilterCriteria{FromBlock: big.NewInt(1), ToBlock: big.NewInt(2), Topics: [][]common.Hash{{eventset.Transfer}}, Addresses: []common.Address{other}})
+	require.NoError(t, err)
 }
 
 func TestGetLogs_BlockHash(t *testing.T) {

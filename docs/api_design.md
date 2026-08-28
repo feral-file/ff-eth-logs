@@ -5,7 +5,7 @@ Rules for the FF Eth Logs JSON-RPC surface. The normative contract is the code i
 ## 1. Transport
 
 - **`POST /`** — JSON-RPC 2.0 over HTTP. Requests are handled by go-ethereum's `rpc.Server` (v1.16.5), so framing, batch requests (a JSON array of requests), parameter decoding and the standard error codes are geth's own: `-32700` parse error, `-32600` invalid request, `-32601` `the method <name> does not exist/is not available`, `-32602` `invalid argument <i>: <reason>` for a parameter that fails to decode.
-- **`GET /health`** — JSON `{"status":"ok","head":<uint64>,"empty":<bool>,"chain_id":<uint64>}`; `503` with `{"status":"error","error":"..."}` when the database does not answer. `head` is the cursor, `empty` is true before the first write.
+- **`GET /health`** — JSON `{"status":"ok","head":<uint64>,"coverage_start":<uint64>,"empty":<bool>,"chain_id":<uint64>}`; `503` with `{"status":"error","error":"..."}` when the database does not answer. `head` and `coverage_start` are the covered interval, `empty` is true before the first write or backfill `finish`.
 - No authentication, no TLS: private network only (see [constraints](constraints.md)).
 - Timeouts: `server.read_timeout` 30 s, `server.write_timeout` 120 s, `rpc.query_timeout` 60 s per database query.
 
@@ -50,13 +50,18 @@ Resolution follows geth's `GetLogs` / `Filter.Logs` order of checks, then bounds
 | any other negative number | `-32000 negative block number` |
 | `fromBlock > toBlock` after tag resolution (e.g. `fromBlock: "latest"` with an explicit lower `toBlock`) | `[]` |
 | either bound above the head | `-32000 out of warehouse scope: blocks A-B extend above the warehouse head H` |
+| `fromBlock` below the coverage start (a warehouse that holds only a tail, or a partially loaded one, never answers history it did not load) | `-32000 out of warehouse scope: blocks A-B extend below the warehouse coverage start S` |
 
 ### 3.3 Scope rule
 
-The one rule the warehouse adds to geth's: **`topics[0]` must be present, non-empty, and every entry must be a warehouse signature.** Otherwise the answer would silently omit every other event on the chain, so the request is refused:
+Two rules the warehouse adds to geth's. First, **`topics[0]` must be present, non-empty, and every entry must be a warehouse signature.** Otherwise the answer would silently omit every other event on the chain, so the request is refused:
 
 - `-32000 out of warehouse scope: filter must name at least one warehouse event signature in topics[0]`
 - `-32000 out of warehouse scope: topic0 0x… is not a warehouse event signature`
+
+Second, **a CryptoPunks signature (`PunkTransfer`, `Assign`, `PunkBought`) is servable only when `address` is present and every entry is `0xb47e3cd837ddf8e4c57f05d70ab865de6e193bbb`.** The same signatures emitted by other contracts are not stored (`eventset.Keep`), so an unpinned or mixed-address filter would return a subset a node would not:
+
+- `-32000 out of warehouse scope: CryptoPunks signatures are stored only for 0xb47E3cd837dDF8e4c57F05d70Ab865de6e193BBB; restrict address to it`
 
 Scope checks run before the head is read, so they are reported even on an empty warehouse. `ScopeError` messages deliberately avoid the words `range`, `limit` and `too many` so a range-cap classifier never mistakes them for a window to halve.
 
@@ -107,8 +112,8 @@ This is where the warehouse knowingly differs from a node: **`[[Transfer]]` retu
 ## 4. What a routing client should do
 
 1. Call `eth_blockNumber` on the warehouse to learn the head `H`.
-2. Send every `eth_getLogs` whose `topics[0]` is within the set and whose range is at or below `H` here, unpaginated (no span cap applies).
-3. Send the residual range `(H, tip]` and anything with an empty or foreign `topics[0]` to the vendor; that range is ≤ a few blocks behind the tip, bills one request and needs no pagination.
+2. Send every `eth_getLogs` whose `topics[0]` is within the set and whose range lies inside `[coverage_start, H]` (`GET /health` reports both) here, unpaginated (no span cap applies).
+3. Send the residual range `(H, tip]`, anything below `coverage_start`, and anything with an empty or foreign `topics[0]` to the vendor; that range is ≤ a few blocks behind the tip, bills one request and needs no pagination.
 4. Treat `-32000 out of warehouse scope: …` as fall-through to the vendor, never as a retry or a window split.
 5. Treat `query returned more than N results` as the existing too-many-results signal and halve the window.
 6. Merge the two legs in `(blockNumber, logIndex)` order.

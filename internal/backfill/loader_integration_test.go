@@ -4,6 +4,7 @@ package backfill
 
 import (
 	"context"
+	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
@@ -41,6 +42,17 @@ type exportBlock struct {
 
 func i64(v int64) *int64 { return &v }
 
+// gapFill produces the blocks strictly between the two runs the test's logs
+// sit in, so eth_blocks is contiguous without hand-writing a million rows in
+// one slice literal.
+func gapFill(from, to int64) []exportBlock {
+	out := make([]exportBlock, 0, to-from+1)
+	for n := from; n <= to; n++ {
+		out = append(out, exportBlock{Number: i64(n), BlockHash: common.BigToHash(big.NewInt(n)).Bytes(), Ts: i64(n * 10)})
+	}
+	return out
+}
+
 func writeParquet[T any](t *testing.T, path string, rows []T) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
@@ -70,10 +82,16 @@ func TestLoaderEndToEnd(t *testing.T) {
 	writeParquet(t, filepath.Join(dir, "logs", "part=001", "logs-000000000001.parquet"), []exportLog{
 		{BlockNumber: i64(1_000_001), LogIndex: i64(0), TxIndex: i64(0), TxHash: h('d'), Address: common.HexToAddress("0x2").Bytes(), Topic0: h('t'), Data: []byte{}, BlockTimestamp: i64(1)},
 	})
-	writeParquet(t, filepath.Join(dir, "blocks", "blocks-000000000000.parquet"), []exportBlock{
-		{Number: i64(7), BlockHash: h('7'), Ts: i64(70)}, {Number: i64(12), BlockHash: h('9'), Ts: i64(120)},
-		{Number: i64(1_000_001), BlockHash: h('x'), Ts: i64(1)}, {Number: i64(1_000_005), BlockHash: h('y'), Ts: i64(5)},
-	})
+	// The blocks export must be one contiguous run (finish checks it).
+	var blocks []exportBlock
+	for n := int64(7); n <= 1_000_005; n++ {
+		if n > 12 && n < 1_000_001 {
+			continue
+		}
+		blocks = append(blocks, exportBlock{Number: i64(n), BlockHash: common.BigToHash(big.NewInt(n)).Bytes(), Ts: i64(n * 10)})
+	}
+	writeParquet(t, filepath.Join(dir, "blocks", "blocks-000000000000.parquet"), blocks)
+	writeParquet(t, filepath.Join(dir, "blocks", "blocks-000000000001.parquet"), gapFill(13, 1_000_000))
 
 	l := New(pool, dir)
 	require.NoError(t, l.Prepare(ctx))
@@ -81,15 +99,24 @@ func TestLoaderEndToEnd(t *testing.T) {
 	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM pg_indexes WHERE tablename = 'eth_logs' AND indexname LIKE 'eth_logs_t%'`).Scan(&n))
 	assert.Equal(t, 0, n, "secondary indexes dropped for the bulk load")
 
-	require.NoError(t, l.Logs(ctx))
+	// finish refuses to publish before every stage's data is present.
+	err := l.Finish(ctx)
+	require.ErrorContains(t, err, "no blocks loaded")
 	require.NoError(t, l.Blocks(ctx))
+	err = l.Finish(ctx)
+	require.ErrorContains(t, err, "part 000 has 0 rows in the database, export has 2")
+	_, ok, err := logstore.NewFromPool(pool).Coverage(ctx)
+	require.NoError(t, err)
+	assert.False(t, ok, "cursor must stay unset until the load is verified")
+
+	require.NoError(t, l.Logs(ctx))
 	require.NoError(t, l.Finish(ctx))
 
 	store := logstore.NewFromPool(pool)
-	head, ok, err := store.Cursor(ctx)
+	cov, ok, err := store.Coverage(ctx)
 	require.NoError(t, err)
 	assert.True(t, ok)
-	assert.Equal(t, uint64(1_000_005), head)
+	assert.Equal(t, logstore.Coverage{Start: 7, Head: 1_000_005}, cov)
 
 	logs, err := store.FilterLogs(ctx, logstore.Query{FromBlock: 0, ToBlock: 2_000_000}, 0)
 	require.NoError(t, err)
@@ -99,7 +126,7 @@ func TestLoaderEndToEnd(t *testing.T) {
 	assert.Len(t, logs[0].Topics, 1)
 	assert.Equal(t, []byte{}, logs[2].Data, "NULL data lands as empty bytes")
 	assert.Equal(t, uint64(120), logs[1].BlockTimestamp)
-	assert.Equal(t, common.BytesToHash(h('9')), logs[1].BlockHash)
+	assert.Equal(t, common.BigToHash(big.NewInt(12)), logs[1].BlockHash)
 
 	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM pg_indexes WHERE tablename = 'eth_logs'`).Scan(&n))
 	assert.Equal(t, 5, n, "PK + four secondary indexes recreated")

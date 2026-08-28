@@ -178,6 +178,9 @@ func Validate(cfg *Config) error {
 		return fmt.Errorf("ethereum.confirmation_blocks (%d) must be below ethereum.max_catchup_blocks (%d)",
 			cfg.Ethereum.ConfirmationBlocks, cfg.Ethereum.MaxCatchupBlocks)
 	}
+	if cfg.Ethereum.ChainID == 0 {
+		return errors.New("ethereum.chain_id must be > 0")
+	}
 	if cfg.RPC.MaxResults < 0 {
 		return errors.New("rpc.max_results must be >= 0")
 	}

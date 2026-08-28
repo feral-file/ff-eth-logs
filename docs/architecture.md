@@ -131,7 +131,7 @@ A wildcard position becomes `IS NOT NULL`, which is what makes an N-position fil
                     ▼                                          internal/backfill (prepare → logs → blocks → finish)
              ┌──────────────────────────────────────────┐               │ COPY via staging, sorted per partition
              │ PostgreSQL: eth_blocks · eth_logs_pNNN   │ ◄─────────────┘
-             │             ingest_cursor (= head)       │
+             │   ingest_cursor [coverage_start, head]   │
              └──────────────────────────────────────────┘
                     │ Head · FilterLogs · BlockByHash
                     ▼
@@ -150,14 +150,14 @@ A wildcard position becomes `IS NOT NULL`, which is what makes an N-position fil
 | `prepare` | `DROP INDEX IF EXISTS` each of `logstore.SecondaryIndexes` (`Dropped index for bulk load`) | already dropped is fine |
 | `logs` | For each `logs/part=NNN/` in order: ensure the partition (`PartitionDDL`), then in one transaction `CREATE TEMP TABLE staging_logs (LIKE eth_logs) ON COMMIT DROP`, COPY every `*.parquet` file into it, `INSERT INTO eth_logs SELECT * FROM staging_logs ORDER BY block_number, log_index` so the heap is chain-ordered (`Partition loaded` with `files`, `rows`, `took`) | a directory whose block range already has rows is skipped (`Partition already loaded, skipping`); a failed directory rolls back to empty |
 | `blocks` | COPY every `blocks/*.parquet` into `eth_blocks` in one transaction (`Blocks load progress` every 500 files, `Blocks loaded`) | skipped when `eth_blocks` is non-empty |
-| `finish` | Recreate the indexes (`Index ready` with `took`), `ANALYZE eth_logs, eth_blocks`, set the cursor to `MAX(eth_blocks.number)` (`Backfill finished; cursor set`) | `already exists` on an index is tolerated; refuses with `no blocks loaded; run the blocks stage first` |
+| `finish` | Verify the load — `eth_blocks` is one contiguous run and every `logs/part=NNN` directory's Parquet footer row count equals the rows in its partition range — then recreate the indexes (`Index ready` with `took`), `ANALYZE eth_logs, eth_blocks`, publish coverage `[MIN(number), MAX(number)]` (`Backfill finished; coverage published`) | `already exists` on an index is tolerated; refuses with `backfill is not complete, cursor not set: …` (`no blocks loaded`, `eth_blocks is not contiguous`, `part NNN has X rows in the database, export has Y`) and leaves the cursor unset |
 
 Sorting happens in PostgreSQL (an external sort bounded by `work_mem`) because the busiest 1 M-block partition holds ~60 M rows. Parquet rows map straight onto the COPY columns: hashes and topics are already `BYTES`, absent topics are NULL, `data` NULL becomes empty, the export's `block_timestamp` is ignored (`eth_blocks.ts` carries it).
 
 ## 7. Scaling Notes
 
 - **One writer** — tail ingestion assumes it is the only process writing the cursor; run one `serve` with ingestion enabled per database. API-only replicas (`ethereum.ingestion_enabled=false`) can share the database.
-- **Partitioning** — `eth_logs` is range-partitioned per 1,000,000 blocks (`eth_logs_p000` … `p039` created by the init script; ingestion creates the next one on demand with `PartitionDDL`). Every query carries a block range, so the planner prunes to the touched partitions; the backfill loads one export directory per partition.
+- **Partitioning** — `eth_logs` is range-partitioned per 1,000,000 blocks (`eth_logs_p000` … `p039` created by the init script; `WriteRange` creates a missing one inside the write transaction with `PartitionDDL`). Every query carries a block range, so the planner prunes to the touched partitions; the backfill loads one export directory per partition.
 - **Size model** (measured 2026-08-28, [probe](probe_2026-08.md)) — ≈ 230 B heap per row (columns + tuple header) and ≈ 260 B of index entries per row (PK ≈ 30 B, each topic index ≈ 60 B, address index ≈ 55 B): **≈ 510 B/log all-in**. 402,266,375 logs → heap 99 GB + indexes 106 GB ≈ **205 GB**. Growth ≈ 2.9 M logs/month ≈ **1.5 GB/month**; a new partition every ~4.5 months.
 - **Index cardinality** — 7.1 M distinct `topic1`, 12.5 M `topic2`, 57.3 M `topic3`, 420 k contracts: owner and contract lookups are selective; the block range in every index key keeps a bounded scan off the heap for out-of-range rows.
 - **Cost of a wide query** — a filter that pins only `topic0` over a wide range is a partition scan; `rpc.max_results` (100k) and `rpc.query_timeout` (60 s) bound it. A genesis-wide `Transfer` query is 293 M rows and is refused by the cap.

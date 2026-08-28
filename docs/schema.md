@@ -8,7 +8,7 @@ PostgreSQL 18, three tables, no foreign keys, no JSON:
 
 - `eth_blocks` — one row per confirmed block: hash and timestamp, stored once and joined on read
 - `eth_logs` — one row per stored log, range-partitioned per 1,000,000 blocks
-- `ingest_cursor` — the single-row warehouse head
+- `ingest_cursor` — the single-row covered interval `[coverage_start, block_number]`
 
 Design rules: `bytea` everywhere (hex text would double every column); block hash and timestamp are not on the log row; every stored log has the shape `internal/eventset` accepts, so the table is narrower than the chain's `Transfer` signature set.
 
@@ -51,17 +51,18 @@ Only confirmed blocks (at least `ethereum.confirmation_blocks` behind the tip) a
 
 ### ingest_cursor
 
-| Column | Type | Description |
+| Column | Type | Notes |
 | --- | --- | --- |
-| id | smallint | Primary key, `CHECK (id = 1)` — exactly one row |
-| block_number | bigint | The warehouse head: last block whose blocks and logs are fully written |
-| updated_at | timestamptz | When the head last moved |
+| `id` | `smallint` PK, `CHECK (id = 1)` | exactly one row |
+| `coverage_start` | `bigint NOT NULL` | oldest block whose blocks row and logs are all stored |
+| `block_number` | `bigint NOT NULL` | the head: newest such block; `CHECK (coverage_start <= block_number)` |
+| `updated_at` | `timestamptz NOT NULL DEFAULT now()` | when the interval last moved |
 
-Written in the same transaction as the blocks and logs it accounts for (`logstore.WriteRange`), so it is never ahead of the data. Absent before the first write or backfill `finish`; `eth_blockNumber` and `eth_getLogs` answer `out of warehouse scope: warehouse is empty` until then. `rewind` lowers it (`UPDATE … WHERE block_number > $1`) and refuses to move it forward.
+The row is the covered interval, and the API answers only inside it. Written in the same transaction as the blocks and logs it accounts for (`logstore.WriteRange`), so it is never ahead of the data; a write must be contiguous with the interval (`from ≤ head+1` and `to+1 ≥ coverage_start`, else `ErrCoverageGap`) and extends it. Absent before the first write or backfill `finish`; `eth_blockNumber` and `eth_getLogs` answer `out of warehouse scope: warehouse is empty` until then. `finish` publishes `[MIN(eth_blocks.number), MAX(eth_blocks.number)]` only after verifying the load. `rewind` lowers the head and refuses to move it forward or below `coverage_start`.
 
 ## 3. Partitions
 
-`eth_logs` is partitioned per **1,000,000 blocks** (`logstore.PartitionBlocks`), named `eth_logs_p%03d` (`eth_logs_p000` covers blocks 0–999,999). `db/init_pg_db.sql` creates 40 up front — to block 40,000,000, roughly 2031 at 12-second blocks. Tail ingestion also creates the partition for a batch on demand with `logstore.PartitionDDL` (`CREATE TABLE IF NOT EXISTS … PARTITION OF eth_logs FOR VALUES FROM (lo) TO (lo + 1000000)`), so running out of pre-created partitions is not a failure mode.
+`eth_logs` is partitioned per **1,000,000 blocks** (`logstore.PartitionBlocks`), named `eth_logs_p%03d` (`eth_logs_p000` covers blocks 0–999,999). `db/init_pg_db.sql` creates 40 up front — to block 40,000,000, roughly 2031 at 12-second blocks. `logstore.WriteRange` probes `to_regclass` for every partition a batch touches and creates a missing one inside the write transaction with `logstore.PartitionDDL` (`CREATE TABLE IF NOT EXISTS … PARTITION OF eth_logs FOR VALUES FROM (lo) TO (lo + 1000000)`), so running out of pre-created partitions is not a failure mode.
 
 The boundaries match the BigQuery export directories (`logs/part=NNN/` = blocks NNN×1,000,000 … +999,999), so the backfill loads one directory into one partition and can skip a directory whose range already has rows.
 
@@ -92,7 +93,7 @@ Levers if a future measurement comes in high, cheapest first: `topic0` as a `sma
 
 Migrations live in `db/migrations/` as sequentially numbered `NNN.sql` and are mirrored into `db/init_pg_db.sql`, which stays the complete schema for a fresh database and for the integration tests.
 
-- `001.sql` — initial schema; identical to `db/init_pg_db.sql` at this version (`\i init_pg_db.sql`). Apply one or the other on a fresh database.
+- `001.sql` — initial schema; identical to `db/init_pg_db.sql` at this version (`\ir ../init_pg_db.sql`, resolved relative to the migration file, so `psql -f db/migrations/001.sql` works from any directory). Apply one or the other on a fresh database.
 
 **Deployment ordering rule**: run a migration before deploying the binary that depends on it; the code has no schema bootstrap of its own beyond on-demand partitions. A migration that rebuilds an `eth_logs` index on the full table is a long, write-blocking operation — schedule it with ingestion stopped and see the `maintenance_work_mem` note in [operations](operations.md).
 

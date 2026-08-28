@@ -30,6 +30,8 @@ func TestSignatures(t *testing.T) {
 		assert.True(t, IsWarehouseSignature(topic))
 	}
 	assert.False(t, IsWarehouseSignature(common.HexToHash("0x01")))
+	assert.True(t, IsCryptoPunksSignature(PunkBought))
+	assert.False(t, IsCryptoPunksSignature(Transfer))
 }
 
 func TestKeep(t *testing.T) {

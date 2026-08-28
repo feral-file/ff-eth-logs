@@ -42,7 +42,7 @@ Stages run in order and are each idempotent (`-stage prepare|logs|blocks|finish`
 1. `prepare` — drops the four secondary indexes (`Dropped index for bulk load`).
 2. `logs` — one transaction per `part=NNN` directory: COPY into a temp staging table, `INSERT … ORDER BY (block_number, log_index)` into the partition (`Partition loaded` with `rows` and `took`; `Partition already loaded, skipping` on re-run). The busiest partition holds ~60 M rows and is sorted by PostgreSQL.
 3. `blocks` — all 4,048 files into `eth_blocks` in one transaction (`Blocks load progress` every 500 files).
-4. `finish` — recreates the indexes (`Index ready` per index with `took`), `ANALYZE`, sets the cursor to `MAX(eth_blocks.number)` (`Backfill finished; cursor set`).
+4. `finish` — verifies the load (every `logs/part=NNN` directory's Parquet row count must equal the rows in its partition, and `eth_blocks` must be one contiguous run; otherwise `backfill is not complete, cursor not set: …` and nothing is published), recreates the indexes (`Index ready` per index with `took`), `ANALYZE`, publishes coverage `[MIN(eth_blocks.number), MAX(eth_blocks.number)]` (`Backfill finished; coverage published`). Until `finish` succeeds the API reports the warehouse as empty.
 
 **Durations are not yet measured** — record the `took` fields of the first production run here. Session-level PostgreSQL settings that matter: `maintenance_work_mem` for the four index builds over 400 M rows (e.g. `maintenance_work_mem = '2GB'`), `work_mem` for the per-partition sort (anything below the partition size spills to an external sort, which is correct but slower), and enough WAL headroom (`max_wal_size`) for a multi-GB COPY per transaction. Set them in `postgresql.conf` for the load or `ALTER SYSTEM`, and reset afterwards.
 
@@ -56,7 +56,7 @@ Start `serve`. Ingestion resumes at cursor + 1 = **25,842,830** and logs `Ethere
 
 ```bash
 curl -s http://<host>:8545/health
-# {"status":"ok","head":<block>,"empty":false,"chain_id":1}
+# {"status":"ok","head":<block>,"coverage_start":0,"empty":false,"chain_id":1}
 ```
 
 `head` must be within a few blocks of the chain tip once the catch-up finishes. Then send the same `eth_getLogs` body to the warehouse and to the vendor for an in-scope filter at or below the head — for example a CryptoPunks `PunkTransfer` query on `0xb47e3cd837ddf8e4c57f05d70ab865de6e193bbb` over a closed range — and diff the arrays; they must be identical.
@@ -99,7 +99,9 @@ The gap from the cursor to the tip exceeds the bound; the bound exists so a stal
 
 The stages are idempotent, so the same command resumes after a failure. To reload one partition deliberately (a corrupt copy, a re-exported directory): stop the service, empty the partition (`TRUNCATE eth_logs_pNNN`), run `-stage logs` (only that directory loads), then `-stage finish` (indexes already exist — tolerated — and the cursor is re-derived from `eth_blocks`). If the indexes were not dropped first the reload is slower but correct.
 
-Never run `backfill` while ingestion is writing: `finish` would set the cursor from `MAX(eth_blocks.number)` under a concurrent writer, and `prepare` would drop the indexes the API is serving from.
+Never run `backfill` while ingestion is writing: `finish` would publish coverage from `eth_blocks` under a concurrent writer, and `prepare` would drop the indexes the API is serving from.
+
+On start, ingestion verifies the provider with `eth_chainId`; a mismatch (`provider chain id X does not match configured ethereum.chain_id Y`) is fatal before any block is written. A `start_block` that is not contiguous with the current coverage is refused at the first write (`write is not contiguous with warehouse coverage`): rewind to it instead, or unset it.
 
 ## 5. Rebuilding from scratch
 
