@@ -1,0 +1,238 @@
+---
+name: Bug Report
+description: File a bug report to help us improve
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        # Bug Report
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Provide a clear and concise description of the bug
+      placeholder: Describe the bug...
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: components
+    attributes:
+      label: Affected Component(s)
+      description: Mark all relevant components
+      options:
+        - label: JSON-RPC API
+        - label: Tail ingestion
+        - label: Backfill loader
+        - label: Database/schema
+        - label: Configuration
+        - label: Deployment/Docker
+        - label: Other
+
+  - type: textarea
+    id: component_other
+    attributes:
+      label: Other Component
+      description: If "Other" is selected, please specify
+      placeholder: Specify the component...
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        ## Environment
+
+  - type: input
+    id: version
+    attributes:
+      label: Version/Commit
+      description: e.g., v1.0.0, commit hash, or branch name
+      placeholder: v1.0.0 or commit hash
+    validations:
+      required: false
+
+  - type: input
+    id: go_version
+    attributes:
+      label: Go Version
+      description: e.g., go1.25
+      placeholder: go1.25
+    validations:
+      required: false
+
+  - type: input
+    id: postgres_version
+    attributes:
+      label: PostgreSQL Version
+      description: e.g., 18.0
+      placeholder: "18.0"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      description: How is the system deployed?
+      options:
+        - Docker Compose
+        - Kubernetes
+        - Local
+        - Other
+    validations:
+      required: false
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - macOS
+        - Linux
+        - Windows
+        - Other
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        ## Steps to Reproduce
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Provide detailed steps to reproduce the bug
+      placeholder: "Enter steps to reproduce (e.g., 1. First, 2. Second)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: Describe what you expected to happen
+      placeholder: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: Describe what actually happened
+      placeholder: What actually happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: errors
+    attributes:
+      label: Error Messages / Logs
+      description: Paste relevant error messages, stack traces, or log excerpts
+      placeholder: "Paste error messages, stack traces, or log excerpts here"
+      render: shell
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        ## Configuration
+
+        If relevant, provide configuration details
+        (sanitize sensitive information)
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Service Config
+      description: |
+        Paste relevant config section
+        (sanitize sensitive information)
+      placeholder: "Paste config section (sanitize sensitive info)"
+      render: yaml
+    validations:
+      required: false
+
+  - type: textarea
+    id: env_vars
+    attributes:
+      label: Environment Variables
+      description: Paste relevant FF_ETH_LOGS_* env vars (sanitize sensitive values such as RPC URLs with embedded keys)
+      placeholder: "# Paste relevant env vars"
+      render: shell
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        ## Request/Log Details
+
+        If the bug is related to a specific eth_getLogs request, contract, or block range
+
+  - type: input
+    id: contract_address
+    attributes:
+      label: Contract Address
+      description: e.g., 0x...
+      placeholder: 0x...
+    validations:
+      required: false
+
+  - type: input
+    id: block_range
+    attributes:
+      label: Block Range
+      description: fromBlock-toBlock or a single block number, if relevant
+      placeholder: "20000000-20000100"
+    validations:
+      required: false
+
+  - type: textarea
+    id: rpc_request
+    attributes:
+      label: JSON-RPC Request
+      description: The failing request body, if applicable
+      placeholder: '{"jsonrpc":"2.0","id":1,"method":"eth_getLogs","params":[{...}]}'
+      render: json
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Context
+      description: |
+        Add any other context, screenshots, or information
+        that might be helpful
+      placeholder: Any additional information...
+    validations:
+      required: false
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      description: Select the severity level
+      options:
+        - Critical (system down, data loss, security issue)
+        - High (major functionality broken)
+        - Medium (minor functionality broken, workaround available)
+        - Low (cosmetic issue, edge case)
+    validations:
+      required: true
+
+  - type: textarea
+    id: possible_solution
+    attributes:
+      label: Possible Solution
+      description: If you have ideas on how to fix this, please share
+      placeholder: Your ideas on how to fix this...
+    validations:
+      required: false

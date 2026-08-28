@@ -1,0 +1,24 @@
+---
+description: Top-level repo contract for ff-eth-logs
+alwaysApply: true
+---
+
+# Repository Contract
+
+Follow `AGENTS.md` as the top-level contract for this repository.
+
+Use `AGENTS.md` as the source of truth for:
+
+- authoritative read order
+- definition of done
+- verification expectations (`make check`)
+- review loop and completion criteria
+- commit and PR conventions
+
+Default operating model:
+
+`spec -> design -> tasks -> tests -> implementation -> verification -> review -> merge`
+
+Use TDD as the default workflow for behavior changes.
+
+Do not skip required verification unless the user explicitly accepts that risk. The review loop is observability, not a gate; see `AGENTS.md`.

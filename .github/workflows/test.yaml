@@ -1,0 +1,104 @@
+name: Test
+
+on:
+  # No paths filter on pull_request: this workflow's job is a required check
+  # on main, and a path-filtered workflow never reports on a docs-only PR —
+  # the PR then blocks forever on a check that cannot run. Pushes keep the
+  # filter. (Same always-report convention as ff-indexer-v2.)
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    paths:
+      - '**/*.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.golangci.yaml'
+      - 'Makefile'
+      - 'db/**'
+      - '.github/workflows/**'
+
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to test'
+        required: true
+        default: 'main'
+      ref:
+        description: "Exact tag or commit SHA (overrides branch if set)"
+        required: false
+        default: ""
+
+jobs:
+  test:
+    name: Test (Go)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: test-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+
+    # PostgreSQL service for the store / API / backfill integration tests
+    # (//go:build integration). The schema is applied by the test harness
+    # from db/init_pg_db.sql.
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref != '' && inputs.ref || inputs.branch }}
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.0'
+          cache: true
+          cache-dependency-path: ./go.sum
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Verify Docker build
+        run: docker build -f tools/docker/Dockerfile .
+
+      - name: Wait for PostgreSQL to be ready
+        run: |
+          until pg_isready -h localhost -p 5432 -U postgres; do
+            echo "Waiting for PostgreSQL..."
+            sleep 2
+          done
+        env:
+          PGPASSWORD: postgres
+
+      - name: Run tests with coverage
+        # -tags=integration includes unit tests plus integration-tagged tests.
+        run: go test -tags=integration -v -coverprofile=coverage.out -covermode=atomic $(go list ./... | grep -vE "/internal/mocks")
+        env:
+          TEST_DB_HOST: localhost
+          TEST_DB_PORT: 5432
+          TEST_DB_USER: postgres
+          TEST_DB_PASSWORD: postgres
+          TEST_DB_NAME: test_db
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: feral-file/ff-eth-logs
+          flags: ff-eth-logs

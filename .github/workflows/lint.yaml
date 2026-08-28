@@ -1,0 +1,74 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.go'
+      - 'go.mod'
+      - 'go.sum'
+      - '.golangci.yaml'
+      - 'Makefile'
+      - 'db/**'
+      - '.github/workflows/**'
+  # No paths filter on pull_request: this workflow's job is a required check
+  # on main, and a path-filtered workflow never reports on a docs-only PR —
+  # the PR then blocks forever on a check that cannot run. Pushes keep the
+  # filter. (Same always-report convention as ff-indexer-v2.)
+  pull_request:
+
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to lint'
+        required: true
+        default: 'main'
+      ref:
+        description: "Exact tag or commit SHA (overrides branch if set)"
+        required: false
+        default: ""
+
+jobs:
+  lint:
+    name: Lint (Go)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: lint-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref != '' && inputs.ref || inputs.branch }}
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.0'
+          cache: true
+          cache-dependency-path: ./go.sum
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.4.0
+          working-directory: ./
+
+      - name: Run go fmt check
+        run: |
+          if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+            echo "Code is not formatted. Please run 'gofmt -s -w .'"
+            gofmt -s -l .
+            exit 1
+          fi
+
+      - name: Verify generated mocks are current
+        run: |
+          go generate ./...
+          git diff --exit-code -- internal/mocks || (echo "mocks are stale: run 'go generate ./...'" && exit 1)

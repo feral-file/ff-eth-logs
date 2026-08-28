@@ -1,0 +1,71 @@
+# Explicit project name: the indexer keeps its compose file in a tools/docker
+# directory too, and Compose derives the default project name from that
+# directory, so without this both stacks would share containers and volumes.
+name: ff-eth-logs
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: ff-eth-logs-postgres
+    environment:
+      POSTGRES_USER: ${FF_ETH_LOGS_DATABASE_USER:-postgres}
+      POSTGRES_PASSWORD: ${FF_ETH_LOGS_DATABASE_PASSWORD:-postgres}
+      POSTGRES_DB: ${FF_ETH_LOGS_DATABASE_DBNAME:-ff_eth_logs}
+    ports:
+      # 5433 by default so it can run next to an indexer dev database on 5432.
+      - "${FF_ETH_LOGS_DB_HOST_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - ../../db/init_pg_db.sql:/docker-entrypoint-initdb.d/init_db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${FF_ETH_LOGS_DATABASE_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ff-eth-logs-network
+    restart: unless-stopped
+
+  ff-eth-logs:
+    build:
+      context: ../..
+      dockerfile: tools/docker/Dockerfile
+    image: ff-eth-logs:latest
+    container_name: ff-eth-logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ../../cmd/ff-eth-logs/config.yaml.sample:/app/config.yaml:ro
+      # Drop the Parquet export here for `docker compose exec ff-eth-logs ./ff-eth-logs backfill -dir /data/v1`.
+      - ../../data:/data:ro
+    env_file:
+      - ../../config/.env
+      - ../../config/.env.local
+    environment:
+      - FF_ETH_LOGS_DATABASE_HOST=postgres
+      - FF_ETH_LOGS_DATABASE_PORT=5432
+    ports:
+      - "${FF_ETH_LOGS_SERVER_PORT:-8545}:8545"
+    networks:
+      - ff-eth-logs-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8545/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  ff-eth-logs-network:
+    driver: bridge

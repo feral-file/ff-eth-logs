@@ -1,0 +1,14 @@
+{
+  "name": "FF Eth Logs",
+  "description": "PostgreSQL warehouse of Ethereum mainnet NFT event logs served over an eth_getLogs-compatible JSON-RPC endpoint, with head-driven tail ingestion and Parquet backfill.",
+  "knowledgeFiles": [
+    "AGENTS.md",
+    "docs/business_requirements.md",
+    "docs/constraints.md",
+    "docs/api_design.md",
+    "docs/architecture.md",
+    "docs/schema.md",
+    "docs/operations.md",
+    "prompts/code-review.md"
+  ]
+}
