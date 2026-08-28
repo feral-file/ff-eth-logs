@@ -110,6 +110,14 @@ func TestLoaderEndToEnd(t *testing.T) {
 	assert.False(t, ok, "cursor must stay unset until the load is verified")
 
 	require.NoError(t, l.Logs(ctx))
+
+	// A directory missing from the copy (not merely empty) blocks finish even
+	// though eth_blocks is contiguous and every present directory matches.
+	require.NoError(t, os.Rename(filepath.Join(dir, "logs", "part=001"), filepath.Join(dir, "part=001.aside")))
+	err = l.Finish(ctx)
+	require.ErrorContains(t, err, "export is missing logs/part=001 for blocks 1000000-1999999")
+	require.NoError(t, os.Rename(filepath.Join(dir, "part=001.aside"), filepath.Join(dir, "logs", "part=001")))
+
 	require.NoError(t, l.Finish(ctx))
 
 	store := logstore.NewFromPool(pool)

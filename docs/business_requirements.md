@@ -59,8 +59,7 @@ The historical half of that traffic does not need a node at all. The warehouse h
 
 ## 8. Known risks
 
-- **Deep reorgs** — a reorg deeper than `confirmation_blocks` is reported, not repaired; the affected heights serve stale data until an operator rewinds ([operations](operations.md)). Post-merge mainnet reorgs are almost always one block deep.
-- **Reorg across a restart** — retained heads live in memory and the cursor stores no hash, so a deep reorg that spans a process restart is not detected.
+- **Deep reorgs** — a reorg deeper than `confirmation_blocks` is repaired automatically by rewinding to the verified common ancestor and re-fetching, and reported at error level ([operations](operations.md)); a fork deeper than 1,024 blocks or below the covered interval stops ingestion for an operator. Post-merge mainnet reorgs are almost always one block deep.
 - **Export freshness** — the BigQuery public dataset lags mainnet by ~2 days; the RPC catch-up after a backfill must be sized (`max_catchup_blocks`) for the age of the export at first start.
 - **Event-set drift** — if the indexer's parsers accept a new signature or shape, the warehouse is incomplete for it until the extract and `eventset.Keep` change together and history is re-exported.
 - **Provider behaviour** — result caps, span caps and transient errors are handled by the ported classifier and retry policy; a new provider phrasing must be added to `internal/chain/errors.go` before cut-over.

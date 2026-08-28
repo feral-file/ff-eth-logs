@@ -136,6 +136,21 @@ func scanLog(rows pgx.Rows) (types.Log, error) {
 	return l, nil
 }
 
+// StoredBlockHash returns the hash the warehouse holds for block n, or
+// ok=false when n is not stored. Ingestion compares it with the canonical
+// header to locate the fork point of a deep reorg.
+func (s *Store) StoredBlockHash(ctx context.Context, n uint64) (common.Hash, bool, error) {
+	var h []byte
+	err := s.pool.QueryRow(ctx, `SELECT hash FROM eth_blocks WHERE number = $1`, int64(n)).Scan(&h) //nolint:gosec // fits int64
+	if errors.Is(err, pgx.ErrNoRows) {
+		return common.Hash{}, false, nil
+	}
+	if err != nil {
+		return common.Hash{}, false, fmt.Errorf("stored block hash %d: %w", n, err)
+	}
+	return common.BytesToHash(h), true, nil
+}
+
 // BlockByHash resolves a blockHash filter to its stored block.
 func (s *Store) BlockByHash(ctx context.Context, hash common.Hash) (Block, bool, error) {
 	var (

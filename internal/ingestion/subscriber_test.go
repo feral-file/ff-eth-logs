@@ -115,16 +115,50 @@ type sinkCall struct {
 // call's ordinal (push more heads, cancel the run, fail the write), which is
 // how tests script what happens between confirmed batches.
 type fakeSink struct {
-	calls []sinkCall
-	steps []func(from, to uint64) error
+	calls   []sinkCall
+	steps   []func(from, to uint64) error
+	stored  map[uint64]common.Hash // block hashes the warehouse holds (seeded + written)
+	rewinds []uint64
 }
 
 func (s *fakeSink) WriteRange(_ context.Context, from, to uint64, blocks []logstore.Block, logs []types.Log) error {
 	s.calls = append(s.calls, sinkCall{From: from, To: to, Blocks: slices.Clone(blocks), Logs: slices.Clone(logs)})
+	if s.stored == nil {
+		s.stored = map[uint64]common.Hash{}
+	}
+	for _, b := range blocks {
+		s.stored[b.Number] = b.Hash
+	}
 	if i := len(s.calls) - 1; i < len(s.steps) && s.steps[i] != nil {
 		return s.steps[i](from, to)
 	}
 	return nil
+}
+
+func (s *fakeSink) StoredBlockHash(_ context.Context, n uint64) (common.Hash, bool, error) {
+	h, ok := s.stored[n]
+	return h, ok, nil
+}
+
+func (s *fakeSink) Rewind(_ context.Context, to uint64) error {
+	s.rewinds = append(s.rewinds, to)
+	for n := range s.stored {
+		if n > to {
+			delete(s.stored, n)
+		}
+	}
+	return nil
+}
+
+// seedStored pretends blocks [from, to] were backfilled with the chain's
+// canonical hashes, so a fork-point walk has persisted hashes to compare.
+func (s *fakeSink) seedStored(c *headChain, from, to uint64) {
+	if s.stored == nil {
+		s.stored = map[uint64]common.Hash{}
+	}
+	for n := from; n <= to; n++ {
+		s.stored[n] = c.canonical(n).Hash
+	}
 }
 
 func (s *fakeSink) ranges() [][2]uint64 {

@@ -66,24 +66,25 @@ curl -s http://<host>:8545/health
 **Signal** — an error-level line (reaches Sentry):
 
 ```text
-ethereum reorg deeper than confirmation lag: a written block was replaced
-  height=<h> lastWritten=<n> newHash=0x…
-  hint="logs for the affected heights are stale; run `ff-eth-logs rewind -to <height-1>` and restart"
+ethereum reorg deeper than confirmation lag: rewinding to the verified common ancestor
+  replacedHeight=<h> lastWritten=<n> ancestor=<a> blocksDropped=<n-a>
 ```
 
-The block at `height` was written and the chain has since replaced it; its logs (and everything above it) are stale until rewound. The service keeps running and keeps writing new blocks — nothing is repaired automatically.
+A written block was replaced by the chain. Recovery is automatic and happens before anything else is written: ingestion walks down from the replaced height comparing each canonical header (`eth_getBlockByNumber`) with the hash persisted in `eth_blocks` until they agree — that block is the verified common ancestor — then deletes every block above it (`logstore.Rewind`), restarts the stream at `ancestor+1`, and re-fetches the canonical blocks through the confirmed head. Nothing stale stays inside the advertised coverage, and the operator target is never derived from the first retained mismatch (the last written head is the only retained one, so the real fork can sit lower).
 
-**Procedure**
+Only the log line needs attention: check that the re-fetch completed (`/health` `head` moving again) and, if the reorg was unusually deep, that the provider is healthy.
 
-1. Stop the service.
-2. Rewind to the block **below** the lowest reported height. `-to` is the last block to keep; everything above it is deleted and re-ingested:
-   ```bash
-   ff-eth-logs rewind -config /app/config.yaml -to <height-1>
-   ```
-   Output `Rewound warehouse to=<height-1>`. `rewind to N: cursor is not above it (nothing to rewind)` means the cursor is already at or below `N`.
-3. Start the service. It resumes at `height`, re-fetches through the current confirmed head, and the replaced range is overwritten.
+**When recovery is fatal** — the process exits with one of:
 
-Post-merge mainnet reorgs are almost always one block deep, so with `confirmation_blocks: 2` this is expected to be rare. A deep reorg that spans a process restart is not detected (retained heads are in memory); if a provider incident makes one plausible, rewind past the incident window deliberately.
+- `reorg deeper than confirmation lag replaced written block <h>: no common ancestor within 1024 blocks below <h>; verify the chain and rewind manually`
+- `… block <n> is not stored, the fork reaches below warehouse coverage; rebuild from the export`
+- `… rewind to <a> after deep reorg: … below the coverage start …`
+
+These mean the fork is deeper than any mainnet reorg should be, or reaches below what the warehouse holds. The supervisor will restart into the same detection, so decide first: verify the chain against a second provider, then either `ff-eth-logs rewind -config /app/config.yaml -to <verified ancestor>` (with the service stopped; `-to` is the last block to keep, and it must be at or above `coverage_start`) or rebuild from the export (section 5).
+
+**Manual rewind** — `ff-eth-logs rewind -to N` is also the tool for re-ingesting a range that is suspected stale for any other reason (a provider incident, a deliberate re-check). Stop the service, rewind, start; it resumes at `N+1`.
+
+A deep reorg that spans a process restart is detected the same way on the next head that disagrees with a persisted hash, because the comparison is against `eth_blocks`, not against in-memory heads.
 
 ## 3. Catch-up too large
 

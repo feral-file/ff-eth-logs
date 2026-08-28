@@ -110,14 +110,16 @@ func (l *Loader) verifyLoaded(ctx context.Context) (logstore.Coverage, error) {
 	if *n != *hi-*lo+1 {
 		return logstore.Coverage{}, fmt.Errorf("eth_blocks is not contiguous: %d rows for blocks %d-%d", *n, *lo, *hi)
 	}
-	parts, err := filepath.Glob(filepath.Join(l.dir, "logs", "part=*"))
-	if err != nil {
-		return logstore.Coverage{}, err
-	}
-	if len(parts) == 0 {
-		return logstore.Coverage{}, fmt.Errorf("no logs/part=* directories under %s", l.dir)
-	}
-	for _, dir := range parts {
+	// The expected directories come from the block interval, not from what
+	// happens to be on disk: the export writes one part=NNN per 1 M blocks up
+	// to the newest block (empty ones included, as a zero-row file), so a
+	// missing directory means an incomplete copy, not an empty partition.
+	for part := uint64(*lo) / logstore.PartitionBlocks; part <= uint64(*hi)/logstore.PartitionBlocks; part++ { //nolint:gosec // non-negative
+		dir := filepath.Join(l.dir, "logs", fmt.Sprintf("part=%03d", part))
+		if _, err := os.Stat(dir); err != nil {
+			return logstore.Coverage{}, fmt.Errorf("export is missing logs/part=%03d for blocks %d-%d; copy the full export",
+				part, part*logstore.PartitionBlocks, part*logstore.PartitionBlocks+logstore.PartitionBlocks-1)
+		}
 		if err := l.verifyPart(ctx, dir, uint64(*hi)); err != nil { //nolint:gosec // non-negative
 			return logstore.Coverage{}, err
 		}

@@ -50,10 +50,28 @@ type Config struct {
 	ConfirmationBlocks uint64
 }
 
-// Sink receives each confirmed batch. WriteRange must be atomic: blocks and
-// logs for [from, to] plus the cursor move to `to`, or nothing.
+// Sink is the warehouse as ingestion sees it. WriteRange must be atomic:
+// blocks and logs for [from, to] plus the cursor move to `to`, or nothing.
+// StoredBlockHash and Rewind serve deep-reorg recovery: the persisted block
+// hashes are the only durable record of what was written, so they are what
+// the fork point is verified against, and Rewind drops everything above it.
 type Sink interface {
 	WriteRange(ctx context.Context, from, to uint64, blocks []logstore.Block, logs []types.Log) error
+	StoredBlockHash(ctx context.Context, n uint64) (common.Hash, bool, error)
+	Rewind(ctx context.Context, to uint64) error
+}
+
+// maxForkWalk bounds the search for a deep reorg's common ancestor. Mainnet
+// finality is ~64 blocks; a fork deeper than 1024 is not a reorg to recover
+// from automatically but an incident to look at.
+const maxForkWalk = 1024
+
+// deepReorgError carries the first written height reconcile found replaced,
+// so record can run the recovery and then retry the head that revealed it.
+type deepReorgError struct{ height uint64 }
+
+func (e *deepReorgError) Error() string {
+	return fmt.Sprintf("written block %d was replaced by a reorg deeper than the confirmation lag", e.height)
 }
 
 // Subscriber follows the chain head and hands confirmed batches to a Sink.
@@ -87,10 +105,10 @@ type streamState struct {
 //
 // Trade-offs: blocks land ConfirmationBlocks blocks (≈12 s each) plus one
 // fetch round-trip after the tip. That lag is the reorg strategy — see
-// planRange: a written block is never rewound automatically, so blocks are
-// written only after the chain has built ConfirmationBlocks on top, and a
-// reorg deeper than that is reported as an error, never replayed (the
-// operator rewinds with `ff-eth-logs rewind`).
+// planRange: blocks are written only after the chain has built
+// ConfirmationBlocks on top; a reorg deeper than that is recovered by
+// rewinding to the verified common ancestor (recoverDeepReorg) and logged at
+// error level so it is visible.
 //
 // Constraints: any subscription error, fetch failure or sink failure returns
 // and ends the process; the supervisor restarts it and it resumes from the
@@ -152,9 +170,9 @@ func drainHeads(heads <-chan *chain.BlockHead) []*chain.BlockHead {
 //     height) simply overwrites — a shallow reorg absorbed by the confirmation
 //     lag, logged at info;
 //   - below next: a written height was replaced, i.e. the reorg is deeper than
-//     ConfirmationBlocks. It is logged as an error naming the affected heights
-//     and NOT rewritten automatically — the served data for those heights is
-//     stale until an operator rewinds (docs/operations.md).
+//     ConfirmationBlocks. The verified common ancestor is located against the
+//     persisted block hashes, everything above it is rewound, and the stream
+//     restarts there (recoverDeepReorg); the event is logged at error level.
 //
 // A head whose parent disagrees with the retained chain is reconciled against
 // canonical heads by number (see reconcile), so a deep reorg announced only by
@@ -207,14 +225,20 @@ func (s *Subscriber) record(ctx context.Context, st *streamState, h *chain.Block
 		if seen && prev.Hash == h.Hash {
 			return nil // duplicate notification of an already-written head
 		}
-		st.reportDeepReorg(ctx, n, h.Hash)
-		return nil
+		return s.handleWrittenHeightHead(ctx, st, h)
 	}
 	// Reconcile before retaining: a head is only allowed to extend the
 	// retained chain (and raise the confirmation tip) once its ancestry agrees
 	// with it. A stale tip — one whose parent the node itself no longer
 	// considers canonical — must not shorten the lag for everyone else.
 	stale, replaced, err := s.reconcile(ctx, st, h)
+	var deep *deepReorgError
+	if errors.As(err, &deep) {
+		if err := s.recoverDeepReorg(ctx, st, deep.height); err != nil {
+			return err
+		}
+		return s.record(ctx, st, h) // the head is above the rewound position now
+	}
 	if err != nil {
 		return err
 	}
@@ -258,7 +282,8 @@ func (st *streamState) truncateAbove(height uint64) {
 // heads by number (wire hashes) down from the parent until the retained chain
 // matches again, replacing stale retained heads and bridging heights no head
 // was received for. Reaching a written height with a different hash is a reorg
-// deeper than the lag: reported, never replayed. Fetches happen only on a
+// deeper than the lag: it returns a deepReorgError for the caller to recover
+// from (recoverDeepReorg). Fetches happen only on a
 // known mismatch and are bounded by the retained window.
 //
 // It returns stale=true when the node says the retained or canonical chain
@@ -289,13 +314,15 @@ func (s *Subscriber) reconcile(ctx context.Context, st *streamState, h *chain.Bl
 			return false, replaced, fmt.Errorf("reconcile reorg at height %d: %w", k, err)
 		}
 		if ok && retained.Hash != canonical.Hash {
-			replaced = true
 			if k < st.next {
-				st.reportDeepReorg(ctx, k, canonical.Hash)
-			} else {
-				logger.InfoCtx(ctx, "Ethereum shallow reorg absorbed within confirmation lag",
-					zap.Uint64("height", k), zap.String("old", retained.Hash.Hex()), zap.String("new", canonical.Hash.Hex()))
+				// A written height is not canonical any more. The retained
+				// window ends here, so the real fork may be lower still; the
+				// caller locates it against the persisted hashes and rewinds.
+				return false, replaced, &deepReorgError{height: k}
 			}
+			replaced = true
+			logger.InfoCtx(ctx, "Ethereum shallow reorg absorbed within confirmation lag",
+				zap.Uint64("height", k), zap.String("old", retained.Hash.Hex()), zap.String("new", canonical.Hash.Hex()))
 		}
 		st.heads[k] = canonical
 		if canonical.Hash != expected {
@@ -310,13 +337,95 @@ func (s *Subscriber) reconcile(ctx context.Context, st *streamState, h *chain.Bl
 	}
 }
 
-// reportDeepReorg logs the operator-visible signal for a written block that
-// the chain has since replaced. It reaches Sentry (error level).
-func (st *streamState) reportDeepReorg(ctx context.Context, height uint64, newHash common.Hash) {
-	logger.ErrorCtx(ctx, errors.New("ethereum reorg deeper than confirmation lag: a written block was replaced"),
-		zap.Uint64("height", height), zap.Uint64("lastWritten", st.next-1),
-		zap.String("newHash", newHash.Hex()),
-		zap.String("hint", "logs for the affected heights are stale; run `ff-eth-logs rewind -to <height-1>` and restart"))
+// handleWrittenHeightHead deals with a notification for a height that is
+// already written but whose hash is not the retained one. It may be a late
+// duplicate of a block we hold, a stale head from a branch the node has
+// already abandoned, or a real replacement; only the node's canonical header
+// decides, compared with the hash persisted for that height.
+func (s *Subscriber) handleWrittenHeightHead(ctx context.Context, st *streamState, h *chain.BlockHead) error {
+	n := uint64(h.Number)
+	stored, ok, err := s.sink.StoredBlockHash(ctx, n)
+	if err != nil {
+		return err
+	}
+	if ok && stored == h.Hash {
+		return nil // late re-delivery of the block we wrote
+	}
+	canonical, err := s.client.HeadByNumber(ctx, n)
+	if err != nil {
+		return fmt.Errorf("verify written block %d after unexpected head: %w", n, err)
+	}
+	if ok && canonical.Hash == stored {
+		logger.DebugCtx(ctx, "Ignoring stale ethereum head at a written height",
+			zap.Uint64("height", n), zap.String("hash", h.Hash.Hex()))
+		return nil
+	}
+	if err := s.recoverDeepReorg(ctx, st, n); err != nil {
+		return err
+	}
+	return s.record(ctx, st, h)
+}
+
+// recoverDeepReorg is the response to a written block the chain has since
+// replaced: find the highest block below it whose persisted hash still
+// matches the canonical header (the verified common ancestor), drop
+// everything above it, and restart the stream there so the canonical blocks
+// are re-fetched.
+//
+// Reason: the indexer only logs a deep reorg because it cannot un-enqueue the
+// events it already emitted; the warehouse can, because a rewind is a range
+// delete and its writes are idempotent. Deriving the target from the first
+// retained mismatch (the old runbook) was wrong: only the last written head
+// is retained, so a fork one block lower would have kept a stale block inside
+// the advertised coverage. Trade-offs: the walk costs one eth_getBlockByNumber
+// per block back to the ancestor; a fork deeper than maxForkWalk, or one
+// reaching below the covered interval, is fatal and needs an operator (the
+// process restarts into the same detection and keeps failing loudly).
+func (s *Subscriber) recoverDeepReorg(ctx context.Context, st *streamState, height uint64) error {
+	ancestor, err := s.findForkPoint(ctx, height)
+	if err != nil {
+		return fmt.Errorf("reorg deeper than confirmation lag replaced written block %d: %w", height, err)
+	}
+	logger.ErrorCtx(ctx, errors.New("ethereum reorg deeper than confirmation lag: rewinding to the verified common ancestor"),
+		zap.Uint64("replacedHeight", height), zap.Uint64("lastWritten", st.next-1),
+		zap.Uint64("ancestor", uint64(ancestor.Number)), zap.Uint64("blocksDropped", st.next-1-uint64(ancestor.Number)))
+	if err := s.sink.Rewind(ctx, uint64(ancestor.Number)); err != nil {
+		return fmt.Errorf("rewind to %d after deep reorg: %w", uint64(ancestor.Number), err)
+	}
+	// Every retained head descends from a branch the walk just proved stale
+	// (or is the head that revealed it and will be re-recorded); restart the
+	// window from the ancestor so reconciliation has a canonical anchor.
+	st.heads = map[uint64]*chain.BlockHead{uint64(ancestor.Number): ancestor}
+	st.next = uint64(ancestor.Number) + 1
+	st.tip = uint64(ancestor.Number)
+	return nil
+}
+
+// findForkPoint walks down from height-1 until the persisted hash equals the
+// canonical header, returning that canonical head. Heights the warehouse
+// does not hold end the walk with an error: the reorg reaches below coverage.
+func (s *Subscriber) findForkPoint(ctx context.Context, height uint64) (*chain.BlockHead, error) {
+	for k := height; k > 0; k-- {
+		n := k - 1
+		if height-n > maxForkWalk {
+			return nil, fmt.Errorf("no common ancestor within %d blocks below %d; verify the chain and rewind manually", maxForkWalk, height)
+		}
+		stored, ok, err := s.sink.StoredBlockHash(ctx, n)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, fmt.Errorf("block %d is not stored, the fork reaches below warehouse coverage; rebuild from the export", n)
+		}
+		canonical, err := s.client.HeadByNumber(ctx, n)
+		if err != nil {
+			return nil, fmt.Errorf("fetch canonical block %d: %w", n, err)
+		}
+		if canonical.Hash == stored {
+			return canonical, nil
+		}
+	}
+	return nil, errors.New("no common ancestor above genesis")
 }
 
 // advance moves past `to` and forgets heads below the last written height.
