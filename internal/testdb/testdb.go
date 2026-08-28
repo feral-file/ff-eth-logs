@@ -28,8 +28,10 @@ var (
 )
 
 // Open returns a pool over a database with the warehouse schema applied and
-// every table empty. Tests in one package share the database, so Open
-// truncates before returning; do not run such tests in parallel.
+// every table empty. Tests share the database, so Open truncates before
+// returning; do not run such tests in parallel — and with TEST_DB_* (one
+// external database for every package) run `go test -p 1`, as the Makefile
+// and CI do, so packages do not truncate each other mid-test.
 func Open(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	once.Do(func() { dsn, err = start() })

@@ -124,7 +124,7 @@ check-env: ## Verify env files exist
 ##@ Check Commands
 
 imports: ## Format imports
-	@goimports -w -local "$(MODULE)" .
+	@goimports -w -local "$(MODULE)" $$(find . -name '*.go' -not -path './internal/mocks/*')
 	@echo "$(COLOR_GREEN)✓ Imports formatted$(COLOR_RESET)"
 
 fmt: ## Apply gofmt -s formatting (matches CI go fmt check)
@@ -148,7 +148,7 @@ test: ## Run unit tests (no external dependencies)
 	@echo "$(COLOR_GREEN)✓ Unit tests passed$(COLOR_RESET)"
 
 test-integration: ## Run unit + integration tests (needs Docker or TEST_DB_* env vars)
-	@go test -tags=integration -cover ./...
+	@go test -tags=integration -p 1 -cover ./...  # -p 1: packages share the database when TEST_DB_* is set
 	@echo "$(COLOR_GREEN)✓ Integration tests passed$(COLOR_RESET)"
 
 check: imports fmt-check lint test test-integration ## Format imports, verify gofmt -s, lint, unit tests, integration tests
