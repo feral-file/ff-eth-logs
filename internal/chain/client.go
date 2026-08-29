@@ -93,14 +93,20 @@ const DefaultCallTimeout = 60 * time.Second
 // Dial connects to a WebSocket (or HTTP) endpoint and wraps it with retries.
 // callTimeout bounds every single RPC attempt (0 = DefaultCallTimeout).
 func Dial(ctx context.Context, rawurl string, callTimeout time.Duration) (EthClient, error) {
-	client, err := ethclient.DialContext(ctx, rawurl)
+	if callTimeout <= 0 {
+		callTimeout = DefaultCallTimeout
+	}
+	// The dial (DNS, TCP, WebSocket upgrade) gets the same deadline as any
+	// call: on a signal-only context a stalled handshake would otherwise
+	// hang ingestion before it has a watchdog, while the API keeps serving.
+	dialCtx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	client, err := ethclient.DialContext(dialCtx, rawurl)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", endpointForLogs(rawurl), RedactURLs(err))
 	}
 	c := NewRealEthClient(client, rawurl)
-	if callTimeout > 0 {
-		c.callTimeout = callTimeout
-	}
+	c.callTimeout = callTimeout
 	return c, nil
 }
 

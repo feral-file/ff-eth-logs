@@ -43,3 +43,21 @@ func TestCallDeadlineBoundsAHangingProvider(t *testing.T) {
 	_, err = c.BlockNumber(ctx)
 	require.ErrorIs(t, err, context.Canceled)
 }
+
+// TestDialIsBounded pins that a provider whose handshake never completes
+// cannot hang startup: Dial fails within the configured timeout.
+func TestDialIsBounded(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release // the WebSocket upgrade never completes
+	}))
+	t.Cleanup(func() { close(release); srv.Close() })
+	wsURL := "ws" + srv.URL[len("http"):]
+
+	start := time.Now()
+	_, err := Dial(context.Background(), wsURL, 100*time.Millisecond)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "dial ws://")
+	require.Less(t, time.Since(start), 2*time.Second)
+}
