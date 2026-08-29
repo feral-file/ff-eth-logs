@@ -95,6 +95,10 @@ type EthereumConfig struct {
 	// GetLogsSpanCap is the provider's eth_getLogs block-range cap
 	// (toBlock-fromBlock). Chainstack: 10100. 0 = discover by rejection.
 	GetLogsSpanCap uint64 `mapstructure:"getlogs_span_cap"`
+	// RPCTimeout bounds one provider RPC attempt (header, receipts, logs,
+	// subscribe request). Exceeding it retries inside the 5-minute budget,
+	// then fails ingestion so the supervisor reconnects.
+	RPCTimeout time.Duration `mapstructure:"rpc_timeout"`
 	// HeadTimeout is the newHeads watchdog: exit when no head arrives for
 	// this long while waiting (a half-open socket delivers nothing). Mainnet
 	// produces a block every 12 s. 0 disables it.
@@ -162,7 +166,7 @@ var keys = []string{
 	"server.host", "server.port", "server.read_timeout", "server.write_timeout", "server.idle_timeout",
 	"database.host", "database.port", "database.user", "database.password", "database.dbname", "database.sslmode", "database.max_conns",
 	"ethereum.websocket_url", "ethereum.chain_id", "ethereum.ingestion_enabled", "ethereum.start_block",
-	"ethereum.confirmation_blocks", "ethereum.max_catchup_blocks", "ethereum.getlogs_span_cap", "ethereum.head_timeout",
+	"ethereum.confirmation_blocks", "ethereum.max_catchup_blocks", "ethereum.getlogs_span_cap", "ethereum.head_timeout", "ethereum.rpc_timeout",
 	"rpc.max_results", "rpc.query_timeout",
 }
 
@@ -184,6 +188,7 @@ func applyDefaults(v *viper.Viper) {
 	v.SetDefault("ethereum.max_catchup_blocks", 50_000)
 	v.SetDefault("ethereum.getlogs_span_cap", 10_000)
 	v.SetDefault("ethereum.head_timeout", "5m")
+	v.SetDefault("ethereum.rpc_timeout", "60s")
 	v.SetDefault("rpc.max_results", 100_000)
 	v.SetDefault("rpc.query_timeout", "60s")
 }

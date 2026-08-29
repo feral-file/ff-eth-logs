@@ -143,7 +143,7 @@ func runServe(args []string) error {
 }
 
 func runIngestion(ctx context.Context, cfg *config.Config, store *logstore.Store) error {
-	client, err := chain.Dial(ctx, cfg.Ethereum.WebSocketURL)
+	client, err := chain.Dial(ctx, cfg.Ethereum.WebSocketURL, cfg.Ethereum.RPCTimeout)
 	if err != nil {
 		return fmt.Errorf("dial ethereum websocket: %w", err)
 	}

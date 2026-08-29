@@ -86,26 +86,55 @@ type BlockHead struct {
 	Timestamp  hexutil.Uint64 `json:"timestamp"`
 }
 
+// DefaultCallTimeout bounds one provider RPC attempt when the caller does
+// not configure ethereum.rpc_timeout.
+const DefaultCallTimeout = 60 * time.Second
+
 // Dial connects to a WebSocket (or HTTP) endpoint and wraps it with retries.
-func Dial(ctx context.Context, rawurl string) (EthClient, error) {
+// callTimeout bounds every single RPC attempt (0 = DefaultCallTimeout).
+func Dial(ctx context.Context, rawurl string, callTimeout time.Duration) (EthClient, error) {
 	client, err := ethclient.DialContext(ctx, rawurl)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", endpointForLogs(rawurl), RedactURLs(err))
 	}
-	return NewRealEthClient(client, rawurl), nil
+	c := NewRealEthClient(client, rawurl)
+	if callTimeout > 0 {
+		c.callTimeout = callTimeout
+	}
+	return c, nil
 }
 
-// RealEthClient wraps ethclient.Client with retry logic.
+// retryPolicy is the exponential backoff every RPC call runs under: the
+// indexer's numbers (5 s initial, 30 s max, 5 min total, ×2, 50 % jitter).
+// A field so tests can shrink it.
+type retryPolicy struct {
+	initial, max, elapsed time.Duration
+}
+
+var defaultRetryPolicy = retryPolicy{initial: 5 * time.Second, max: 30 * time.Second, elapsed: 5 * time.Minute}
+
+// RealEthClient wraps ethclient.Client with retry logic and a per-attempt
+// deadline.
+//
+// Reason for the deadline: ingestion runs on a signal-only context, and the
+// retry budget only starts counting once an attempt returns. A provider call
+// that never answers (a wedged socket after the head was delivered, when
+// the newHeads watchdog is stopped) would otherwise block ingestion forever
+// while /health stays green. Every attempt therefore gets its own deadline;
+// exceeding it is a retryable failure inside the 5-minute budget, after
+// which the call fails and ingestion exits for the supervisor to reconnect.
 type RealEthClient struct {
-	client *ethclient.Client
-	url    string
+	client      *ethclient.Client
+	url         string
+	callTimeout time.Duration
+	retry       retryPolicy
 }
 
 // NewRealEthClient creates a RealEthClient. The stored URL is reduced to
 // scheme and host: it exists only for log context, and provider URLs carry
 // the API key in the path (Infura, Chainstack), which must never reach logs.
 func NewRealEthClient(client *ethclient.Client, url string) *RealEthClient {
-	return &RealEthClient{client: client, url: endpointForLogs(url)}
+	return &RealEthClient{client: client, url: endpointForLogs(url), callTimeout: DefaultCallTimeout, retry: defaultRetryPolicy}
 }
 
 // endpointForLogs strips everything but scheme and host from an RPC URL.
@@ -168,6 +197,8 @@ var retryableMessages = []string{
 
 // isRetryableEthError decides whether an RPC failure is worth retrying.
 // Unknown errors are permanent by default to avoid infinite retries.
+// Context errors here are the caller's (the per-attempt deadline is
+// classified separately in executeWithRetry).
 func isRetryableEthError(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
@@ -202,20 +233,29 @@ func isTransientSyscall(err error) bool {
 		errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EHOSTUNREACH)
 }
 
-// executeWithRetry runs operation under exponential backoff (5 s initial,
-// 30 s max, 5 min total, ×2, 50 % jitter) — the indexer's policy verbatim.
-func (c *RealEthClient) executeWithRetry(ctx context.Context, operation func() error, operationName string) error {
+// executeWithRetry runs operation under exponential backoff (the indexer's
+// policy) with a deadline per attempt. An attempt that exceeds its own
+// deadline while the caller's context is still live is retried like any
+// transport timeout; a caller cancellation is permanent.
+func (c *RealEthClient) executeWithRetry(ctx context.Context, operation func(ctx context.Context) error, operationName string) error {
 	b := backoff.NewExponentialBackOff()
-	b.InitialInterval = 5 * time.Second
-	b.MaxInterval = 30 * time.Second
-	b.MaxElapsedTime = 5 * time.Minute
+	b.InitialInterval = c.retry.initial
+	b.MaxInterval = c.retry.max
+	b.MaxElapsedTime = c.retry.elapsed
 	b.Multiplier = 2.0
 	b.RandomizationFactor = 0.5
 
 	retryOperation := func() error {
-		err := RedactURLs(operation())
+		attemptCtx, cancel := context.WithTimeout(ctx, c.callTimeout)
+		err := RedactURLs(operation(attemptCtx))
+		cancel()
 		if err == nil {
 			return nil
+		}
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			logger.WarnCtx(ctx, "ethereum call exceeded its deadline; retrying",
+				zap.String("operation", operationName), zap.Duration("timeout", c.callTimeout), zap.String("url", c.url))
+			return fmt.Errorf("retryable error: %s exceeded %s: %w", operationName, c.callTimeout, err)
 		}
 		if isRetryableEthError(err) {
 			logger.WarnCtx(ctx, "retryable ethereum error encountered",
@@ -237,9 +277,9 @@ func (c *RealEthClient) executeWithRetry(ctx context.Context, operation func() e
 // its Err channel and is the caller's to re-establish.
 func (c *RealEthClient) SubscribeNewHead(ctx context.Context, ch chan<- *BlockHead) (ethereum.Subscription, error) {
 	var sub ethereum.Subscription
-	err := c.executeWithRetry(ctx, func() error {
+	err := c.executeWithRetry(ctx, func(ctx context.Context) error {
 		var err error
-		sub, err = c.client.Client().EthSubscribe(ctx, ch, "newHeads")
+		sub, err = c.client.Client().EthSubscribe(ctx, ch, "newHeads") // ctx bounds only the subscribe request, not the subscription
 		return err
 	}, "SubscribeNewHead")
 	return sub, err
@@ -248,7 +288,7 @@ func (c *RealEthClient) SubscribeNewHead(ctx context.Context, ch chan<- *BlockHe
 // FilterLogs is eth_getLogs with retry logic.
 func (c *RealEthClient) FilterLogs(ctx context.Context, query ethereum.FilterQuery) ([]types.Log, error) {
 	var logs []types.Log
-	err := c.executeWithRetry(ctx, func() error {
+	err := c.executeWithRetry(ctx, func(ctx context.Context) error {
 		var err error
 		logs, err = c.client.FilterLogs(ctx, query)
 		return err
@@ -260,7 +300,7 @@ func (c *RealEthClient) FilterLogs(ctx context.Context, query ethereum.FilterQue
 // node does not have the block) is permanent: ethereum.NotFound.
 func (c *RealEthClient) HeadByNumber(ctx context.Context, number uint64) (*BlockHead, error) {
 	var head *BlockHead
-	err := c.executeWithRetry(ctx, func() error {
+	err := c.executeWithRetry(ctx, func(ctx context.Context) error {
 		var result *BlockHead
 		if err := c.client.Client().CallContext(ctx, &result, "eth_getBlockByNumber", hexutil.EncodeUint64(number), false); err != nil {
 			return err
@@ -277,7 +317,7 @@ func (c *RealEthClient) HeadByNumber(ctx context.Context, number uint64) (*Block
 // BlockReceipts is eth_getBlockReceipts with retry logic.
 func (c *RealEthClient) BlockReceipts(ctx context.Context, number uint64) ([]*types.Receipt, error) {
 	var receipts []*types.Receipt
-	err := c.executeWithRetry(ctx, func() error {
+	err := c.executeWithRetry(ctx, func(ctx context.Context) error {
 		var err error
 		receipts, err = c.client.BlockReceipts(ctx, rpc.BlockNumberOrHashWithNumber(rpc.BlockNumber(number))) //nolint:gosec // block numbers fit int64
 		return err
@@ -288,7 +328,7 @@ func (c *RealEthClient) BlockReceipts(ctx context.Context, number uint64) ([]*ty
 // BlockNumber is eth_blockNumber with retry logic.
 func (c *RealEthClient) BlockNumber(ctx context.Context) (uint64, error) {
 	var n uint64
-	err := c.executeWithRetry(ctx, func() error {
+	err := c.executeWithRetry(ctx, func(ctx context.Context) error {
 		var err error
 		n, err = c.client.BlockNumber(ctx)
 		return err
@@ -299,7 +339,7 @@ func (c *RealEthClient) BlockNumber(ctx context.Context) (uint64, error) {
 // ChainID is eth_chainId with retry logic.
 func (c *RealEthClient) ChainID(ctx context.Context) (uint64, error) {
 	var id uint64
-	err := c.executeWithRetry(ctx, func() error {
+	err := c.executeWithRetry(ctx, func(ctx context.Context) error {
 		n, err := c.client.ChainID(ctx)
 		if err != nil {
 			return err
