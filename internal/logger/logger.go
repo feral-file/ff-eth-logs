@@ -80,12 +80,18 @@ func Initialize(cfg Config) error {
 	return nil
 }
 
-// Flush flushes buffered Sentry events; call it on shutdown.
+// Flush flushes buffered Sentry events; call it after the last error line,
+// before the process exits.
 func Flush(timeout time.Duration) {
 	if sentryClient != nil {
 		sentryClient.Flush(timeout)
 	}
 }
+
+// Initialized reports whether Initialize has built the global logger. Before
+// that, FromContext returns a no-op logger, so a caller that must not lose a
+// message (a fatal startup error) writes it elsewhere.
+func Initialized() bool { return log != nil }
 
 // FromContext returns the logger with the context's component field attached.
 // Before Initialize (tests) it returns a no-op logger rather than nil.

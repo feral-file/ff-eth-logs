@@ -14,6 +14,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strconv"
@@ -54,12 +55,31 @@ func run(args []string) int {
 	}
 }
 
+// flushTimeout bounds the Sentry flush that follows the terminal log line.
+const flushTimeout = 2 * time.Second
+
+// stderr is where a fatal error goes when no logger exists yet (tests swap it).
+var stderr io.Writer = os.Stderr
+
+// exit turns the subcommand's result into an exit code. It is the one
+// terminal path: the fatal line is written first, then Sentry is flushed, so
+// the event that describes the exit is delivered before os.Exit. Failures
+// that happen before the logger exists (config, logger setup) go to stderr
+// instead of the no-op fallback logger, so an operator still sees why the
+// process refused to start.
 func exit(err error) int {
+	defer logger.Flush(flushTimeout)
 	if err != nil && !errors.Is(err, context.Canceled) {
+		if !logger.Initialized() {
+			_, _ = fmt.Fprintf(stderr, "ff-eth-logs: %v\n", err)
+			return 1
+		}
 		logger.ErrorCtx(context.Background(), errors.New("ff-eth-logs stopped with error"), zap.Error(err))
 		return 1
 	}
-	logger.Info("ff-eth-logs stopped")
+	if logger.Initialized() {
+		logger.Info("ff-eth-logs stopped")
+	}
 	return 0
 }
 
@@ -96,7 +116,6 @@ func runServe(args []string) error {
 		return err
 	}
 	defer stop()
-	defer logger.Flush(2 * time.Second)
 
 	store, err := logstore.Open(ctx, cfg.Database.DSN())
 	if err != nil {

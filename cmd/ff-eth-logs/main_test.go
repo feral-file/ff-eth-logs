@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -18,9 +20,29 @@ func TestRunDispatch(t *testing.T) {
 }
 
 func TestExit(t *testing.T) {
+	var out bytes.Buffer
+	stderr = &out
+	t.Cleanup(func() { stderr = os.Stderr })
+
 	assert.Equal(t, 0, exit(nil))
 	assert.Equal(t, 0, exit(context.Canceled), "shutdown by signal is a clean exit")
-	assert.Equal(t, 1, exit(errors.New("boom")))
+	// Before the logger exists (bad config, logger setup) the error must still
+	// reach the operator: it goes to stderr instead of the no-op logger.
+	assert.Equal(t, 1, exit(errors.New("load config: missing required config: database.host")))
+	assert.Equal(t, "ff-eth-logs: load config: missing required config: database.host\n", out.String())
+}
+
+// TestStartupFailureIsVisible pins the end-to-end path: an invalid
+// configuration makes the subcommand exit 1 with the reason on stderr.
+func TestStartupFailureIsVisible(t *testing.T) {
+	var out bytes.Buffer
+	stderr = &out
+	t.Cleanup(func() { stderr = os.Stderr })
+	t.Setenv("FF_ETH_LOGS_DATABASE_HOST", "")
+	t.Setenv("FF_ETH_LOGS_ETHEREUM_INGESTION_ENABLED", "false")
+
+	assert.Equal(t, 1, run([]string{"serve", "-env", t.TempDir()}))
+	assert.Contains(t, out.String(), "missing required config: database.host")
 }
 
 func TestRewindRequiresTarget(t *testing.T) {

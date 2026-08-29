@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"time"
 
 	"github.com/feral-file/ff-eth-logs/internal/backfill"
 	"github.com/feral-file/ff-eth-logs/internal/logger"
@@ -25,7 +24,6 @@ func runBackfill(args []string) error {
 		return err
 	}
 	defer stop()
-	defer logger.Flush(2 * time.Second)
 	if dir == "" {
 		return errors.New("backfill: -dir is required")
 	}
