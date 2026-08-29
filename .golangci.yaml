@@ -58,8 +58,12 @@ linters:
 issues:
   max-issues-per-linter: 0   # keep unlimited, as before
   max-same-issues: 0         # …
-  new: true                  # show only issues on changed lines (handy for CI)
-  new-from-merge-base: main  # compare against the main branch
+  # Whole-repository linting on every run. A diff-only mode (new-from-merge-base)
+  # needs a resolvable base ref on every checkout (a detached pull_request
+  # checkout has origin/main, not main) and silently reports nothing on pushes
+  # to the base branch itself; the repository lints clean in full, so there is
+  # no reason to narrow the scope.
+  new: false
 
 
 # ==========
