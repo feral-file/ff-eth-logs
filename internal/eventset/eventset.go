@@ -90,25 +90,21 @@ func IsWarehouseSignature(topic0 common.Hash) bool {
 	return ok
 }
 
-// RequiredPositions returns, for a standard signature, the number of topic
-// positions an eth_getLogs filter must carry for the stored shape to be the
-// only shape a node could return, and ok=false when no filter can pin it.
-//
-// Reason: a filter with N positions matches logs with at least N topics. The
-// Transfer family is stored only with 4 topics, and 4 is the maximum, so a
-// 4-position filter is exact — while [[Transfer]] alone would also match
-// 3-topic ERC-20 and 1-topic pre-standard logs on a node that the warehouse
-// does not hold. MetadataUpdate / BatchMetadataUpdate (1 topic) and URI
-// (2 topics) are stored only in their standard shape, but a ≥1 or ≥2 filter
-// would also match nonstandard emitters with extra indexed arguments on a
-// node, so no filter over them can be answered exactly; the API refuses
-// them until every shape of those signatures is stored.
-func RequiredPositions(topic0 common.Hash) (positions int, ok bool) {
-	want, isStandard := topicCount[topic0]
-	if !isStandard || want != 4 {
-		return 0, false
+// OmittedShapes describes, per standard signature, what a node returns for
+// that topic0 that the warehouse never stores — the fixed, documented delta
+// between a vendor answer and a warehouse answer for the same filter.
+func OmittedShapes(topic0 common.Hash) string {
+	switch topic0 {
+	case Transfer:
+		return "logs with fewer than 4 topics (ERC-20 Transfer, pre-standard NFT Transfer)"
+	case TransferSingle, TransferBatch:
+		return "logs with fewer than 4 topics (malformed emitters)"
+	case MetadataUpdate, BatchMetadataUpdate:
+		return "logs with more than 1 topic (nonstandard emitters with indexed arguments)"
+	case URI:
+		return "logs with a topic count other than 2 (nonstandard emitters)"
 	}
-	return 4, true
+	return ""
 }
 
 // IsCryptoPunksSignature reports whether topic0 is one of the three

@@ -60,10 +60,19 @@ Two rules the warehouse adds to geth's. First, **`topics[0]` must be present, no
 - `-32000 out of warehouse scope: filter must name at least one warehouse event signature in topics[0]`
 - `-32000 out of warehouse scope: topic0 0x… is not a warehouse event signature`
 
-Second, **the filter's position count must make the stored shape the only shape a node could return.** A filter with N positions matches logs with at least N topics. `Transfer`, `TransferSingle` and `TransferBatch` are stored only with four topics, so they need a **4-position** `topics` filter (wildcards allowed, e.g. `[[Transfer], null, null, null]`); `[[Transfer]]` alone would also return 3-topic ERC-20 and 1-topic pre-standard Transfers on a node, which the warehouse does not hold. `MetadataUpdate`, `BatchMetadataUpdate` and `URI` are stored only in their standard shape (1, 1 and 2 topics) but a `≥N` filter would also match nonstandard emitters on a node, so **no filter over them is served** until every shape of those signatures is stored:
+Second, **what an in-scope answer is.** On the logs it stores, the warehouse applies the vendor's matching semantics exactly: addresses OR'd, a valued topic position must exist and match, an empty position (`null`, `[]`, or absent) imposes nothing — not even that the topic exists. That last point was measured, not assumed: on Infura (Geth v1.17.5, 2026-08-29, block 25,700,000) `[[Transfer]]`, `[[Transfer],null,null,null]`, `[[Transfer],[],[],[]]` and `[[Transfer],null]` all returned the same 814 logs (804 of them 3-topic ERC-20), for range and `blockHash` queries alike; go-ethereum's older `filterLogs` rule "N positions need ≥ N topics" is not what the vendor serves. Position count is therefore not a scope rule here.
 
-- `-32000 out of warehouse scope: topic0 0x… needs a 4-position topics filter (wildcards allowed) to exclude the shapes the warehouse does not store`
-- `-32000 out of warehouse scope: topic0 0x… is stored only in its standard shape, which no filter can pin; ask a node`
+What differs from the vendor is only the **stored set**: per signature, the warehouse never holds the shapes the indexer's parsers reject, so a vendor answer minus those shapes equals the warehouse answer (verified: the vendor's 25-block `[[Transfer],null,null,null]` answer filtered to 4-topic logs was identical, 65 = 65, to the warehouse's). The omitted shapes (`eventset.OmittedShapes`):
+
+| Signature | Never stored (a node returns them, the warehouse does not) |
+| --- | --- |
+| `Transfer` | logs with fewer than 4 topics — ERC-20 `Transfer`, pre-standard NFT transfers (CryptoKitties) |
+| `TransferSingle`, `TransferBatch` | logs with fewer than 4 topics (malformed emitters) |
+| `MetadataUpdate`, `BatchMetadataUpdate` | logs with more than 1 topic (nonstandard emitters with indexed arguments) |
+| `URI` | logs with a topic count other than 2 |
+| CryptoPunks signatures | the same signatures emitted by any contract other than `0xb47e…3bbb` (and such filters are refused, see below) |
+
+A client that needs any of those must ask a node; the indexer does not, because its parsers discard exactly them.
 
 Third, **a CryptoPunks signature (`PunkTransfer`, `Assign`, `PunkBought`) is servable only when `address` is present and every entry is `0xb47e3cd837ddf8e4c57f05d70ab865de6e193bbb`.** The same signatures emitted by other contracts are not stored (`eventset.Keep`), so an unpinned or mixed-address filter would return a subset a node would not:
 
@@ -118,8 +127,8 @@ The stored shapes are the ones the indexer's parsers accept; a node holds more (
 ## 4. What a routing client should do
 
 1. Call `eth_blockNumber` on the warehouse to learn the head `H`.
-2. Send every `eth_getLogs` whose `topics[0]` is within the set, whose shape rule holds (four positions for the Transfer family; CryptoPunks pinned to the contract; no metadata/URI signatures), and whose range lies inside `[coverage_start, H]` (`GET /health` reports both) here, unpaginated (no span cap applies). The indexer's owner scans are 2- and 3-position filters (`[[sigs], [owner]]`, `[[sigs], null, [owner]]`); the routing client pads them to four positions with `null` before sending them here — on a node that only drops logs with fewer than four topics, which the indexer's parsers discard anyway, so the padded and unpadded answers are identical for it.
-3. Send the residual range `(H, tip]`, anything below `coverage_start`, and anything with an empty or foreign `topics[0]` to the vendor; that range is ≤ a few blocks behind the tip, bills one request and needs no pagination.
+2. Send every `eth_getLogs` whose `topics[0]` is within the set (CryptoPunks signatures pinned to the contract) and whose range lies inside `[coverage_start, H]` (`GET /health` reports both) here, unpaginated (no span cap applies), with the filter unchanged — position count does not matter to either side.
+3. Send the residual range `(H, tip]`, anything below `coverage_start`, anything with an empty or foreign `topics[0]`, and anything that needs the omitted shapes (ERC-20, nonstandard emitters) to the vendor; that range is ≤ a few blocks behind the tip, bills one request and needs no pagination.
 4. Treat `-32000 out of warehouse scope: …` as fall-through to the vendor, never as a retry or a window split.
 5. Treat `query returned more than N results` as the existing too-many-results signal and halve the window.
 6. Merge the two legs in `(blockNumber, logIndex)` order.

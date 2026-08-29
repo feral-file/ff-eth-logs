@@ -10,7 +10,7 @@ A PostgreSQL warehouse of Ethereum mainnet NFT event logs, served over a JSON-RP
 `ff-eth-logs` stores every mainnet log the Feral File indexer can consume — ERC-721 `Transfer`, ERC-1155 `TransferSingle` / `TransferBatch` / `URI`, EIP-4906 `MetadataUpdate` / `BatchMetadataUpdate`, and the three CryptoPunks events — from genesis to a few blocks behind the chain tip, and serves them with go-ethereum's own filter semantics:
 
 - **`eth_getLogs` over full history in one query** — no 10k-block span cap, no per-window billing, no pagination walk. An owner scan or a token's provenance is one SQL query instead of ~2,600 vendor calls.
-- **Exact results** — the stored set is the shape-filtered set the indexer's parsers accept; for an in-scope filter the answer is tuple-for-tuple what a node returns. Anything the warehouse cannot answer exactly is refused, never partially answered.
+- **Exact on the stored set** — the warehouse applies the vendor's matching semantics to the logs it holds, so for an in-scope filter the answer is tuple-for-tuple the vendor's minus a fixed, documented set of shapes that are never stored (ERC-20 `Transfer`s and nonstandard emitters — exactly what the indexer's parsers discard). Anything outside coverage or the event set is refused, never partially answered.
 - **Kept current** — a tail ingestion job follows `newHeads` with a confirmation lag and writes each confirmed block, its logs and the cursor in one transaction.
 - **Rebuildable** — the full history comes from a one-off BigQuery export loaded by the `backfill` command; nothing in the warehouse is unique state.
 
@@ -53,7 +53,7 @@ The sample config and `config/.env` point at port `5432`; when the database is t
 
 - `POST /` — JSON-RPC 2.0: `eth_getLogs`, `eth_blockNumber` (the warehouse head, not the chain tip), `eth_chainId`. Every other method returns `-32601`.
 - `GET /health` — `{"status":"ok","head":<block>,"coverage_start":<block>,"empty":<bool>,"chain_id":1}`.
-- A filter must pin `topics[0]` to warehouse signatures with a shape a node could not answer differently (four positions for the Transfer family, the CryptoPunks address for CryptoPunks signatures; metadata/URI signatures are refused) and stay inside `[coverage_start, head]`; otherwise the reply is `-32000 out of warehouse scope: ...`, which a routing client treats as "ask the vendor".
+- A filter must pin `topics[0]` to warehouse signatures (CryptoPunks signatures additionally to the CryptoPunks address) and stay inside `[coverage_start, head]`; otherwise the reply is `-32000 out of warehouse scope: ...`, which a routing client treats as "ask the vendor".
 
 ```bash
 curl -s -X POST -H 'content-type: application/json' http://localhost:8545 --data '{

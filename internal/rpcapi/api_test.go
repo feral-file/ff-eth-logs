@@ -45,8 +45,8 @@ func (f *fakeWarehouse) BlockByHash(_ context.Context, h common.Hash) (logstore.
 	return b, ok, nil
 }
 
-// transfer4 is the exact Transfer filter: four positions, so only 4-topic
-// logs match on a node as well.
+// transfer4 is the padded Transfer filter the indexer's provenance queries
+// use; position count is not a scope rule (see TestGetLogs_AnyPositionCount).
 func transfer4() [][]common.Hash { return [][]common.Hash{{eventset.Transfer}, nil, nil, nil} }
 
 func transferCrit(from, to int64) FilterCriteria {
@@ -189,38 +189,19 @@ func TestGetLogs_CryptoPunksMustPinAddress(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestGetLogs_ShapeScope pins that a filter is served only when its position
-// count makes the stored shape the only shape a node could return: the
-// Transfer family needs four positions (wildcards allowed) because a node
-// would also return 3-topic ERC-20 and 1-topic pre-standard Transfers; the
-// metadata/URI signatures cannot be pinned by any filter and are refused;
-// CryptoPunks signatures are stored in every shape and pass with the address.
-func TestGetLogs_ShapeScope(t *testing.T) {
+// TestGetLogs_AnyPositionCount pins that position count is not a scope
+// rule: the vendor ignores trailing wildcards, so [[Transfer]] and the padded
+// form are both served (the delta to a node is the unstored shapes, not the
+// filter shape).
+func TestGetLogs_AnyPositionCount(t *testing.T) {
 	ctx := context.Background()
-	api := NewAPI(&fakeWarehouse{head: 100}, Config{ChainID: 1})
-	crit := func(topics [][]common.Hash, addrs ...common.Address) FilterCriteria {
-		return FilterCriteria{FromBlock: big.NewInt(1), ToBlock: big.NewInt(2), Topics: topics, Addresses: addrs}
+	wh := &fakeWarehouse{head: 100}
+	api := NewAPI(wh, Config{ChainID: 1})
+	for _, topics := range [][][]common.Hash{{{eventset.Transfer}}, {{eventset.Transfer}, nil}, {{eventset.Transfer, eventset.MetadataUpdate}, nil, nil, nil}, {{eventset.URI}}} {
+		_, err := api.GetLogs(ctx, FilterCriteria{FromBlock: big.NewInt(1), ToBlock: big.NewInt(2), Topics: topics})
+		require.NoError(t, err)
+		assert.Equal(t, topics, wh.gotQ.Topics)
 	}
-	var scope *ScopeError
-
-	for _, sig := range []common.Hash{eventset.Transfer, eventset.TransferSingle, eventset.TransferBatch} {
-		_, err := api.GetLogs(ctx, crit([][]common.Hash{{sig}}))
-		require.ErrorAs(t, err, &scope, sig.Hex())
-		assert.Contains(t, err.Error(), "needs a 4-position topics filter")
-		_, err = api.GetLogs(ctx, crit([][]common.Hash{{sig}, nil, {common.HexToHash("0xee")}}))
-		require.ErrorAs(t, err, &scope, "3 positions still admit 3-topic logs on a node")
-		_, err = api.GetLogs(ctx, crit([][]common.Hash{{sig}, nil, nil, nil}))
-		require.NoError(t, err, sig.Hex())
-	}
-	for _, sig := range []common.Hash{eventset.MetadataUpdate, eventset.BatchMetadataUpdate, eventset.URI} {
-		_, err := api.GetLogs(ctx, crit([][]common.Hash{{sig}}))
-		require.ErrorAs(t, err, &scope, sig.Hex())
-		assert.Contains(t, err.Error(), "stored only in its standard shape")
-		_, err = api.GetLogs(ctx, crit([][]common.Hash{{eventset.Transfer, sig}, nil, nil, nil}))
-		require.ErrorAs(t, err, &scope, "mixed with Transfer it is still refused")
-	}
-	_, err := api.GetLogs(ctx, crit([][]common.Hash{{eventset.PunkTransfer}}, eventset.CryptoPunksAddress))
-	require.NoError(t, err, "every CryptoPunks shape is stored, so one position is exact")
 }
 
 func TestGetLogs_BlockHash(t *testing.T) {

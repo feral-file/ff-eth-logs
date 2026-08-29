@@ -31,6 +31,8 @@ func TestSignatures(t *testing.T) {
 	}
 	assert.False(t, IsWarehouseSignature(common.HexToHash("0x01")))
 	assert.True(t, IsCryptoPunksSignature(PunkBought))
+	assert.Contains(t, OmittedShapes(Transfer), "ERC-20")
+	assert.Empty(t, OmittedShapes(PunkBought))
 	assert.False(t, IsCryptoPunksSignature(Transfer))
 }
 

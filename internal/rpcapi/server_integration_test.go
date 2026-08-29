@@ -39,7 +39,7 @@ func TestServerRoundTripWithEthclient(t *testing.T) {
 	}
 	require.NoError(t, store.WriteRange(ctx, 5, 6, blocks, logs))
 
-	api := NewAPI(store, Config{ChainID: 1, MaxResults: 1})
+	api := NewAPI(store, Config{ChainID: 1, MaxResults: 2})
 	srv, err := NewServer(ServerConfig{Host: "127.0.0.1"}, api)
 	require.NoError(t, err)
 	ts := httptest.NewServer(srv.http.Handler)
@@ -64,19 +64,23 @@ func TestServerRoundTripWithEthclient(t *testing.T) {
 	want.BlockHash, want.BlockTimestamp = blocks[0].Hash, blocks[0].Timestamp
 	assert.Equal(t, want, got[0])
 
-	// The 4-position filter excludes the 3-topic log, as on a node; a
-	// 3-position one would not on a node, so the warehouse refuses it.
+	// Wildcard positions impose nothing (vendor semantics): the 3-topic log
+	// stored here is matched by a 4-position filter with trailing wildcards,
+	// and a valued position selects on the topic's value only.
 	got, err = client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(5), ToBlock: big.NewInt(6),
 		Topics: [][]common.Hash{{eventset.Transfer}, {common.HexToHash("0x3")}, nil, nil}})
 	require.NoError(t, err)
-	assert.Len(t, got, 1, "4-topic logs only; the 3-topic one is excluded as on a node")
-	_, err = client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(5), ToBlock: big.NewInt(6),
-		Topics: [][]common.Hash{{eventset.Transfer}, nil, {owner}}})
-	require.ErrorContains(t, err, "needs a 4-position topics filter")
+	assert.Len(t, got, 1)
+	got, err = client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(5), ToBlock: big.NewInt(6),
+		Topics: [][]common.Hash{{eventset.Transfer}, nil, nil, {common.HexToHash("0x9")}}})
+	require.NoError(t, err)
+	assert.Len(t, got, 2, "a valued position selects on the value; the 3-topic log has no topic3")
 
-	// max_results=1: the two 4-topic matches produce the Infura-style error.
-	_, err = client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(5), ToBlock: big.NewInt(6), Topics: [][]common.Hash{{eventset.Transfer}, nil, nil, {common.HexToHash("0x9")}}})
-	require.EqualError(t, err, "query returned more than 1 results")
+	// max_results=2: the 4-position wildcard filter matches all three stored
+	// logs (trailing wildcards do not require the topic to exist) and so
+	// produces the Infura-style error rather than a truncated answer.
+	_, err = client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(5), ToBlock: big.NewInt(6), Topics: [][]common.Hash{{eventset.Transfer}, nil, nil, nil}})
+	require.EqualError(t, err, "query returned more than 2 results")
 
 	// Scope errors reach the client with code -32000.
 	_, err = client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(5), ToBlock: big.NewInt(7), Topics: [][]common.Hash{{eventset.Transfer}, nil, nil, nil}})
@@ -90,11 +94,11 @@ func TestServerRoundTripWithEthclient(t *testing.T) {
 	require.ErrorAs(t, err, &rpcErr)
 	assert.Equal(t, "out of warehouse scope: blocks 0-6 extend below the warehouse coverage start 5", rpcErr.Error())
 
-	// blockHash queries resolve through eth_blocks.
+	// blockHash queries resolve through eth_blocks (both logs of block 6).
 	h := blocks[1].Hash
 	got, err = client.FilterLogs(ctx, ethereum.FilterQuery{BlockHash: &h, Topics: [][]common.Hash{{eventset.Transfer}, nil, nil, nil}})
 	require.NoError(t, err)
-	assert.Len(t, got, 1)
+	assert.Len(t, got, 2)
 	assert.Equal(t, uint64(6), got[0].BlockNumber)
 
 	// Unknown methods get geth's -32601 text; invalid params get -32602.

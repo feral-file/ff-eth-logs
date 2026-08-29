@@ -23,9 +23,9 @@ func TestBuildFilter(t *testing.T) {
 	assert.Contains(t, sql, "l.block_number BETWEEN $1 AND $2")
 	assert.Contains(t, sql, "l.address = ANY($3::bytea[])")
 	assert.Contains(t, sql, "l.topic0 = ANY($4::bytea[])")
-	assert.Contains(t, sql, "l.topic1 IS NOT NULL")
+	assert.NotContains(t, sql, "l.topic1 ", "a wildcard position adds no clause")
 	assert.Contains(t, sql, "l.topic2 = ANY($5::bytea[])")
-	assert.Contains(t, sql, "l.topic3 IS NOT NULL")
+	assert.NotContains(t, sql, "l.topic3 ")
 	assert.True(t, strings.HasSuffix(sql, "ORDER BY l.block_number, l.log_index LIMIT 101"), sql)
 	require.Len(t, args, 5)
 	assert.Equal(t, int64(5), args[0])
@@ -33,7 +33,6 @@ func TestBuildFilter(t *testing.T) {
 
 	sql, args = buildFilter(Query{FromBlock: 1, ToBlock: 1}, 0)
 	assert.NotContains(t, sql, "LIMIT")
-	assert.NotContains(t, sql, "IS NOT NULL")
 	assert.NotContains(t, sql, "ANY(")
 	assert.Len(t, args, 2)
 }

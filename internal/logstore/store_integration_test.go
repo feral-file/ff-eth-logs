@@ -86,9 +86,12 @@ func TestWriteRangeCursorAndRewind(t *testing.T) {
 	assert.Len(t, got, 2)
 }
 
-// referenceFilter is go-ethereum's eth/filters filterLogs, copied so the SQL
-// translation is checked against the semantics the indexer relies on rather
-// than against my reading of them.
+// referenceFilter is the vendor's eth_getLogs matching as observed on Infura
+// (Geth v1.17.5, 2026-08-29): addresses OR'd, a valued position must exist
+// and match, an empty position matches anything — including a log that has
+// no topic there. It deliberately differs from go-ethereum v1.16's
+// filterLogs ("N positions need ≥ N topics"), which the vendor does not
+// apply in range or blockHash queries.
 func referenceFilter(logs []types.Log, q Query) []types.Log {
 	var out []types.Log
 	for _, l := range logs {
@@ -98,15 +101,12 @@ func referenceFilter(logs []types.Log, q Query) []types.Log {
 		if len(q.Addresses) > 0 && !slices.Contains(q.Addresses, l.Address) {
 			continue
 		}
-		if len(q.Topics) > len(l.Topics) {
-			continue
-		}
 		match := true
 		for i, sub := range q.Topics {
 			if len(sub) == 0 {
 				continue
 			}
-			if !slices.Contains(sub, l.Topics[i]) {
+			if i >= len(l.Topics) || !slices.Contains(sub, l.Topics[i]) {
 				match = false
 				break
 			}

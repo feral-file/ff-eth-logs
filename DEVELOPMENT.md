@@ -154,7 +154,7 @@ Tests are split by the `integration` build tag:
 
 - **Unit tests** (no tag) — `make test` (`go test -cover ./...`). No external dependencies; the chain client is mocked with `internal/mocks` (regenerate with `go generate ./...`).
 - **Integration tests** (`//go:build integration`) — `make test-integration` (`go test -tags=integration -cover ./...`). The `logstore` and `rpcapi` suites need PostgreSQL 18: a testcontainers instance when `TEST_DB_HOST` is unset, or an external database from `TEST_DB_HOST`, `TEST_DB_PORT`, `TEST_DB_USER`, `TEST_DB_PASSWORD`, `TEST_DB_NAME`. They load `db/init_pg_db.sql` and include:
-  - the **differential test**: every filter shape (wildcard positions, a 4-position filter against a 1-topic log, address OR, block-hash lookups) evaluated by go-ethereum's in-memory `filterLogs` semantics and by `logstore.FilterLogs` SQL, results compared tuple for tuple;
+  - the **differential test**: every filter shape (wildcard positions — which impose nothing, as measured on the vendor — valued positions, address OR, block-hash lookups) evaluated by a reference implementation of the vendor's matching semantics and by `logstore.FilterLogs` SQL, results compared tuple for tuple;
   - `TestSchemaMatchesInit`: `logstore.SecondaryIndexes` versus the statements in `db/init_pg_db.sql`.
 
 `-tags=integration` is additive: `make test-integration` runs unit and integration tests together, the same as CI.

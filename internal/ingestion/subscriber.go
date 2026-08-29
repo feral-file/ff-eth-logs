@@ -366,6 +366,7 @@ func (s *Subscriber) reconcile(ctx context.Context, st *streamState, h *chain.Bl
 	// reorg could have orphaned, so unretained heights end the walk.
 	_, bridge := st.heads[st.next-1]
 	expected := h.ParentHash
+	fetched := 0
 	for k := n - 1; ; k-- {
 		retained, ok := st.heads[k]
 		if ok && retained.Hash == expected {
@@ -377,6 +378,14 @@ func (s *Subscriber) reconcile(ctx context.Context, st *streamState, h *chain.Bl
 		canonical, err := s.client.HeadByNumber(ctx, k)
 		if err != nil {
 			return false, replaced, fmt.Errorf("reconcile reorg at height %d: %w", k, err)
+		}
+		// After a restart the bridge is the cursor block, so the first live
+		// head walks every intermediate header (the same headers the catch-up
+		// needs as block metadata, retained here); say so rather than sit
+		// silently for a 17k-block gap.
+		if fetched++; fetched%1000 == 0 {
+			logger.InfoCtx(ctx, "Reconciling headers down to the retained chain",
+				zap.Uint64("fromHeight", n), zap.Uint64("atHeight", k), zap.Uint64("bridge", st.next-1), zap.Int("fetched", fetched))
 		}
 		if ok && retained.Hash != canonical.Hash {
 			if k < st.next {

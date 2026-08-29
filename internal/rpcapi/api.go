@@ -48,12 +48,12 @@ type API struct {
 // NewAPI creates the receiver.
 func NewAPI(store Warehouse, cfg Config) *API { return &API{store: store, cfg: cfg} }
 
-// ScopeError is returned for a request the warehouse cannot answer exactly:
-// a block outside the covered interval, a signature outside the event set, a
-// filter without a topic0, a Transfer-family filter without the four
-// positions that exclude unstored shapes, a metadata/URI signature (no
-// filter can pin its stored shape), or a CryptoPunks signature not pinned
-// to the CryptoPunks contract. It carries JSON-RPC code -32000 (geth's default for
+// ScopeError is returned for a request the warehouse cannot answer from its
+// stored set: a block outside the covered interval, a signature outside the
+// event set, a filter without a topic0, or a CryptoPunks signature not
+// pinned to the CryptoPunks contract. Within scope the answer is the vendor's
+// minus the shapes the warehouse never stores (eventset.OmittedShapes), a
+// fixed delta documented in docs/api_design.md. It carries JSON-RPC code -32000 (geth's default for
 // handler errors) and a message that deliberately avoids the words a
 // range-cap classifier keys on ("range", "limit", "too many"), so a client
 // treats it as out-of-scope rather than as a window to halve.
@@ -143,12 +143,13 @@ func (a *API) GetLogs(ctx context.Context, crit FilterCriteria) ([]*types.Log, e
 	return out, nil
 }
 
-// checkTopicScope enforces the rules the warehouse adds to geth's: the
-// filter must pin topic0 to warehouse signatures (otherwise the answer would
-// silently omit every other event on the chain), and a CryptoPunks signature
-// must be pinned to the CryptoPunks contract, because the same signatures
-// from any other address are not stored (eventset.Keep) — an unpinned filter
-// would return a subset a node would not.
+// checkTopicScope enforces the rules the warehouse adds: the filter must pin
+// topic0 to warehouse signatures (otherwise the answer would silently omit
+// every other event on the chain), and a CryptoPunks signature must be
+// pinned to the CryptoPunks contract, because the same signatures from any
+// other address are not stored (eventset.Keep). Topic position counts are
+// not constrained: the vendor ignores trailing wildcards (see logstore.Query),
+// so no position rule could change what a node returns.
 func checkTopicScope(topics [][]common.Hash, addresses []common.Address) error {
 	if len(topics) == 0 || len(topics[0]) == 0 {
 		return &ScopeError{Reason: "filter must name at least one warehouse event signature in topics[0]"}
@@ -158,29 +159,10 @@ func checkTopicScope(topics [][]common.Hash, addresses []common.Address) error {
 		if !eventset.IsWarehouseSignature(sig) {
 			return &ScopeError{Reason: fmt.Sprintf("topic0 %s is not a warehouse event signature", sig.Hex())}
 		}
-		if err := checkShapeScope(sig, len(topics)); err != nil {
-			return err
-		}
 		punks = punks || eventset.IsCryptoPunksSignature(sig)
 	}
 	if punks && !onlyCryptoPunks(addresses) {
 		return &ScopeError{Reason: fmt.Sprintf("CryptoPunks signatures are stored only for %s; restrict address to it", eventset.CryptoPunksAddress.Hex())}
-	}
-	return nil
-}
-
-// checkShapeScope refuses a filter whose position count would let a node
-// return shapes the warehouse does not store (see eventset.RequiredPositions).
-func checkShapeScope(sig common.Hash, positions int) error {
-	if eventset.IsCryptoPunksSignature(sig) {
-		return nil // every shape from the CryptoPunks contract is stored
-	}
-	need, ok := eventset.RequiredPositions(sig)
-	if !ok {
-		return &ScopeError{Reason: fmt.Sprintf("topic0 %s is stored only in its standard shape, which no filter can pin; ask a node", sig.Hex())}
-	}
-	if positions != need {
-		return &ScopeError{Reason: fmt.Sprintf("topic0 %s needs a %d-position topics filter (wildcards allowed) to exclude the shapes the warehouse does not store", sig.Hex(), need)}
 	}
 	return nil
 }

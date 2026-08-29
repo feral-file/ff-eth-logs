@@ -19,9 +19,15 @@ type Query struct {
 	// Addresses are OR'd; empty = any.
 	Addresses []common.Address
 	// Topics[i] is OR'd within the position and AND'd across positions; an
-	// empty position is a wildcard. A query with N positions only matches
-	// logs with at least N topics — the rule that makes [[Transfer],[],[],[]]
-	// exclude ERC-20 on a real node, reproduced here as IS NOT NULL.
+	// empty position is a wildcard that imposes nothing — not even that the
+	// topic exists. That is what the vendor does (Infura, Geth v1.17.5,
+	// verified 2026-08-29: [[Transfer]], [[Transfer],null,null,null] and
+	// [[Transfer],[],[],[]] all return the same 3-topic ERC-20 logs, in range
+	// and blockHash queries alike), and go-ethereum's older filterLogs rule
+	// "N positions need ≥ N topics" would drop stored 1-topic MetadataUpdate
+	// logs from a mixed [[Transfer, MetadataUpdate], null, null, null] query
+	// that the vendor answers. A position with values requires the topic to
+	// exist and match, which a NULL column never does.
 	Topics [][]common.Hash
 }
 
@@ -146,8 +152,7 @@ func buildFilter(q Query, limit int) (string, []any) {
 	for i, sub := range q.Topics {
 		col := fmt.Sprintf("l.topic%d", i)
 		if len(sub) == 0 {
-			where = append(where, col+" IS NOT NULL")
-			continue
+			continue // wildcard: no clause, the topic need not exist
 		}
 		vals := make([][]byte, len(sub))
 		for j, h := range sub {
