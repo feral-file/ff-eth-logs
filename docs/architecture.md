@@ -113,11 +113,11 @@ POST /  →  rpc.Server (geth)  →  API.GetLogs(FilterCriteria)
                     SELECT … FROM eth_logs l JOIN eth_blocks b ON b.number = l.block_number
                     WHERE l.block_number BETWEEN $1 AND $2
                       [AND l.address = ANY($3::bytea[])]
-                      [AND l.topicN = ANY($k::bytea[]) | l.topicN IS NOT NULL]   -- per position
+                      [AND l.topicN = ANY($k::bytea[])]                          -- per valued position; a wildcard adds nothing
                     ORDER BY l.block_number, l.log_index LIMIT max_results + 1
 ```
 
-A wildcard position becomes `IS NOT NULL`, which is what makes an N-position filter match only logs with at least N topics, as geth's `filterLogs` does. `LIMIT max_results + 1` lets the reader tell "exactly the limit" from "more" and return an error rather than a truncated slice. `blockHash` filters resolve through `eth_blocks_hash` to a single-block range.
+A wildcard position adds no predicate: the vendor imposes no existence constraint on wildcard positions (measured, see [api design](api_design.md)), and a valued position on a NULL column never matches, so a log without that topic is excluded by the value test alone. `LIMIT max_results + 1` lets the reader tell "exactly the limit" from "more" and return an error rather than a truncated slice. `blockHash` filters resolve through `eth_blocks_hash` to a single-block range.
 
 ## 5. Data Flow
 

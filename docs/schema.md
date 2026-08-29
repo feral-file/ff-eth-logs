@@ -9,6 +9,7 @@ PostgreSQL 18, three tables, no foreign keys, no JSON:
 - `eth_blocks` — one row per confirmed block: hash and timestamp, stored once and joined on read
 - `eth_logs` — one row per stored log, range-partitioned per 1,000,000 blocks
 - `ingest_cursor` — the single-row covered interval `[coverage_start, block_number]`
+- `backfill_units` — per loaded unit (`logs/part=NNN`, `blocks`), the fingerprint of the manifest entries it was loaded from
 
 Design rules: `bytea` everywhere (hex text would double every column); block hash and timestamp are not on the log row; every stored log has the shape `internal/eventset` accepts, so the table is narrower than the chain's `Transfer` signature set.
 
@@ -47,7 +48,18 @@ Only confirmed blocks (at least `ethereum.confirmation_blocks` behind the tip) a
 
 **Why no block_hash or timestamp per row** — both are per-block facts joined from `eth_blocks` at read time: 33 + 8 bytes saved per row across 400 M rows, and a rewound block rewrites one `eth_blocks` row instead of thousands of log rows.
 
-**NULL topics** — a wildcard filter position is `topicN IS NOT NULL`, which reproduces go-ethereum's rule that an N-position filter matches only logs with at least N topics.
+**NULL topics** — a log with fewer than four topics leaves the higher `topicN` columns NULL. A wildcard filter position adds no predicate (the vendor imposes no existence constraint on wildcard positions — [api design](api_design.md)); a valued position is `topicN = ANY(...)`, which a NULL never satisfies, so a log without that topic cannot match it.
+
+### backfill_units
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `unit` | `text` PK | `logs/part=NNN` or `blocks` |
+| `fingerprint` | `text NOT NULL` | SHA-256 over the unit's `manifest.json` entries (path, size, MD5) |
+| `rows_loaded` | `bigint NOT NULL` | rows the stage copied |
+| `loaded_at` | `timestamptz NOT NULL` | |
+
+Written in the same transaction as the unit's rows. A stage skips a unit only when the database holds the manifest's row count *and* the recorded fingerprint equals the current manifest's; otherwise the unit is cleared and reloaded, so a corrected export with the same row count but different bytes is never taken as already loaded. `finish` refuses to publish while any unit in the interval was loaded from a different export than the manifest describes (`… was loaded from a different export than manifest.json describes (or never recorded); rerun its stage`).
 
 ### ingest_cursor
 

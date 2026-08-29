@@ -2,7 +2,9 @@ package backfill
 
 import (
 	"crypto/md5" //nolint:gosec // GCS reports MD5 for objects; used for integrity, not authentication
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -138,6 +140,28 @@ func (m *Manifest) verifyFilesUnder(dir, prefix string) error {
 		}
 	}
 	return nil
+}
+
+// unitFingerprint identifies the export content of one unit (a partition
+// directory or blocks/): the SHA-256 over its manifest entries (path, size,
+// MD5), sorted. A stage records it when it loads the unit and skips the unit
+// later only if the recorded value equals the current manifest's — a
+// corrected export with the same row count but different bytes therefore
+// reloads instead of being taken as "done".
+func (m *Manifest) unitFingerprint(prefix string) string {
+	names := make([]string, 0, len(m.Files))
+	for name := range m.Files {
+		if strings.HasPrefix(name, prefix) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	h := sha256.New()
+	for _, name := range names {
+		f := m.Files[name]
+		_, _ = fmt.Fprintf(h, "%s|%d|%s\n", name, f.Size, f.MD5)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // fileSizeAndMD5 streams one file, returning its size and base64 MD5.

@@ -48,6 +48,19 @@ CREATE INDEX IF NOT EXISTS eth_logs_t2 ON eth_logs (topic2, block_number) WHERE 
 CREATE INDEX IF NOT EXISTS eth_logs_t3 ON eth_logs (topic3, block_number) WHERE topic3 IS NOT NULL;
 CREATE INDEX IF NOT EXISTS eth_logs_addr ON eth_logs (address, block_number);
 
+-- What the backfill loaded, per unit ("logs/part=NNN" or "blocks"): the
+-- fingerprint of that unit's manifest entries (file sizes + MD5s). A stage
+-- skips a unit only when the database holds the manifest's row count AND
+-- the recorded fingerprint equals the current manifest's; a corrected export
+-- with the same row count but different content therefore reloads, and
+-- finish refuses to publish while any unit was loaded from another export.
+CREATE TABLE IF NOT EXISTS backfill_units (
+    unit        text PRIMARY KEY,
+    fingerprint text NOT NULL,
+    rows_loaded bigint NOT NULL,
+    loaded_at   timestamptz NOT NULL DEFAULT now()
+);
+
 -- The covered interval [coverage_start, block_number]: every block in it has
 -- its eth_blocks row and every warehouse log. Exactly one row; written in the
 -- same transaction as the blocks and logs it accounts for, so it is never

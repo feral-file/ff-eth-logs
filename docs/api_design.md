@@ -87,7 +87,7 @@ go-ethereum's `filterLogs` rules, reproduced in SQL:
 
 - `address` values are OR'd; empty means any.
 - `topics[i]` values are OR'd within a position and AND'd across positions; an empty position is a wildcard.
-- A filter with N positions matches only logs with **at least N topics** — a wildcard position is `topicN IS NOT NULL`. `[[Transfer],[],[],[]]` therefore matches only 4-topic logs, exactly as on a node.
+- A wildcard position (`null`, `[]`, or absent) imposes **nothing** — the log need not have a topic there — exactly as the vendor does (see the measurement above); `[[Transfer],[],[],[]]` and `[[Transfer]]` are the same filter. A valued position must exist and match.
 
 ### 3.5 Result shape
 

@@ -119,8 +119,14 @@ func (l *Loader) verifyLoaded(ctx context.Context) (logstore.Coverage, error) {
 		return logstore.Coverage{}, fmt.Errorf("eth_blocks holds %d rows for blocks %d-%d, %s says %d rows for %d-%d",
 			*n, *lo, *hi, ManifestName, m.Blocks.Rows, m.Blocks.First, m.Blocks.Last)
 	}
+	if err := l.verifyUnitLoadedFrom(ctx, m, blocksUnit, "blocks/"); err != nil {
+		return logstore.Coverage{}, err
+	}
 	for part := m.Blocks.First / logstore.PartitionBlocks; part <= m.Blocks.Last/logstore.PartitionBlocks; part++ {
 		if err := l.verifyPart(ctx, m, part); err != nil {
+			return logstore.Coverage{}, err
+		}
+		if err := l.verifyUnitLoadedFrom(ctx, m, manifestPartDir(part), manifestPartDir(part)+"/"); err != nil {
 			return logstore.Coverage{}, err
 		}
 	}
@@ -128,6 +134,21 @@ func (l *Loader) verifyLoaded(ctx context.Context) (logstore.Coverage, error) {
 		return logstore.Coverage{}, err
 	}
 	return logstore.Coverage{Start: m.Blocks.First, Head: m.Blocks.Last}, nil
+}
+
+// verifyUnitLoadedFrom refuses to publish a unit whose rows came from an
+// export other than the one described by the current manifest: counts,
+// ranges and current-file checksums cannot tell a same-count replacement
+// apart, the recorded fingerprint can.
+func (l *Loader) verifyUnitLoadedFrom(ctx context.Context, m *Manifest, unit, prefix string) error {
+	recorded, err := l.loadedUnit(ctx, unit)
+	if err != nil {
+		return err
+	}
+	if recorded != m.unitFingerprint(prefix) {
+		return fmt.Errorf("%s was loaded from a different export than %s describes (or never recorded); rerun its stage", unit, ManifestName)
+	}
+	return nil
 }
 
 // verifyPart checks one partition against the manifest: the directory must
@@ -192,6 +213,31 @@ func parquetRowCount(path string) (int64, error) {
 	return pf.NumRows(), nil
 }
 
+// loadedUnit returns the fingerprint recorded for a unit, or "" when the
+// unit was never loaded (or was loaded before fingerprints existed).
+func (l *Loader) loadedUnit(ctx context.Context, unit string) (string, error) {
+	var fp string
+	err := l.pool.QueryRow(ctx, `SELECT fingerprint FROM backfill_units WHERE unit = $1`, unit).Scan(&fp)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read backfill unit %s: %w", unit, err)
+	}
+	return fp, nil
+}
+
+// recordUnit stores the fingerprint a unit was loaded from, inside tx so it
+// commits with the rows.
+func recordUnit(ctx context.Context, tx pgx.Tx, unit, fingerprint string, rows int64) error {
+	_, err := tx.Exec(ctx, `INSERT INTO backfill_units (unit, fingerprint, rows_loaded, loaded_at) VALUES ($1, $2, $3, now())
+		ON CONFLICT (unit) DO UPDATE SET fingerprint = EXCLUDED.fingerprint, rows_loaded = EXCLUDED.rows_loaded, loaded_at = now()`, unit, fingerprint, rows)
+	if err != nil {
+		return fmt.Errorf("record backfill unit %s: %w", unit, err)
+	}
+	return nil
+}
+
 func isDuplicateRelation(err error) bool {
 	return strings.Contains(err.Error(), "already exists")
 }
@@ -235,13 +281,19 @@ func (l *Loader) loadPart(ctx context.Context, m *Manifest, part uint64) error {
 		int64(lo), int64(hi)).Scan(&have); err != nil { //nolint:gosec // fits int64
 		return fmt.Errorf("count partition %d: %w", part, err)
 	}
-	if have == want {
-		logger.InfoCtx(ctx, "Partition already loaded, skipping", zap.Uint64("part", part), zap.Int64("rows", have))
+	unit := manifestPartDir(part)
+	fingerprint := m.unitFingerprint(unit + "/")
+	recorded, err := l.loadedUnit(ctx, unit)
+	if err != nil {
+		return err
+	}
+	if have == want && recorded == fingerprint {
+		logger.InfoCtx(ctx, "Partition already loaded from this export, skipping", zap.Uint64("part", part), zap.Int64("rows", have))
 		return nil
 	}
 	if have != 0 {
-		logger.WarnCtx(ctx, "Partition holds a different row count than the manifest; reloading it",
-			zap.Uint64("part", part), zap.Int64("rows", have), zap.Int64("manifestRows", want))
+		logger.WarnCtx(ctx, "Partition was loaded from different content or holds a different row count; reloading it",
+			zap.Uint64("part", part), zap.Int64("rows", have), zap.Int64("manifestRows", want), zap.Bool("sameExport", recorded == fingerprint))
 	}
 	start := time.Now()
 	conn, err := l.pool.Acquire(ctx)
@@ -279,6 +331,9 @@ func (l *Loader) loadPart(ctx context.Context, m *Manifest, part uint64) error {
 	if _, err := tx.Exec(ctx, `INSERT INTO eth_logs SELECT * FROM staging_logs ORDER BY block_number, log_index`); err != nil {
 		return fmt.Errorf("insert part %d: %w", part, err)
 	}
+	if err := recordUnit(ctx, tx, unit, fingerprint, rows); err != nil {
+		return err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
@@ -313,13 +368,18 @@ func (l *Loader) Blocks(ctx context.Context) error {
 		int64(m.Blocks.First), int64(m.Blocks.Last)).Scan(&have); err != nil { //nolint:gosec // fits int64
 		return fmt.Errorf("check blocks: %w", err)
 	}
-	if have == m.Blocks.Rows {
-		logger.InfoCtx(ctx, "Blocks already loaded, skipping", zap.Int64("rows", have))
+	fingerprint := m.unitFingerprint("blocks/")
+	recorded, err := l.loadedUnit(ctx, blocksUnit)
+	if err != nil {
+		return err
+	}
+	if have == m.Blocks.Rows && recorded == fingerprint {
+		logger.InfoCtx(ctx, "Blocks already loaded from this export, skipping", zap.Int64("rows", have))
 		return nil
 	}
 	if have != 0 {
-		logger.WarnCtx(ctx, "eth_blocks holds a different row count than the manifest; reloading",
-			zap.Int64("rows", have), zap.Int64("manifestRows", m.Blocks.Rows))
+		logger.WarnCtx(ctx, "eth_blocks was loaded from different content or holds a different row count; reloading",
+			zap.Int64("rows", have), zap.Int64("manifestRows", m.Blocks.Rows), zap.Bool("sameExport", recorded == fingerprint))
 	}
 	start := time.Now()
 	tx, err := l.pool.Begin(ctx)
@@ -344,6 +404,9 @@ func (l *Loader) Blocks(ctx context.Context) error {
 		if (i+1)%500 == 0 {
 			logger.InfoCtx(ctx, "Blocks load progress", zap.Int("files", i+1), zap.Int("of", len(files)), zap.Int64("rows", rows))
 		}
+	}
+	if err := recordUnit(ctx, tx, blocksUnit, fingerprint, rows); err != nil {
+		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
@@ -376,6 +439,9 @@ var (
 	logColumns   = []string{"block_number", "log_index", "tx_index", "tx_hash", "address", "topic0", "topic1", "topic2", "topic3", "data"}
 	blockColumns = []string{"number", "hash", "ts"}
 )
+
+// blocksUnit is the backfill_units key of the blocks stage.
+const blocksUnit = "blocks"
 
 // rowMapper turns one Parquet row into a COPY row, given the column index
 // of every named Parquet column.

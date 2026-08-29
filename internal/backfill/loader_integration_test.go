@@ -171,6 +171,22 @@ func TestLoaderEndToEnd(t *testing.T) {
 	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM eth_logs WHERE block_number < 1000000`).Scan(&n))
 	assert.Equal(t, 2, n)
 
+	// Same-count replacement: a corrected export replaces part=000 with
+	// different content but the same row count, plus its own manifest. The
+	// stage must reload (fingerprint differs), and finish must refuse while
+	// the recorded fingerprint does not match the manifest in use.
+	corrected := []exportLog{
+		{BlockNumber: i64(12), LogIndex: i64(4), TxIndex: i64(1), TxHash: h('a'), Address: common.HexToAddress("0x1").Bytes(), Topic0: h('t'), Topic1: h('1'), Topic2: h('2'), Topic3: h('3'), Data: []byte{7, 7}, BlockTimestamp: i64(1)},
+		{BlockNumber: i64(7), LogIndex: i64(0), TxIndex: i64(0), TxHash: h('b'), Address: common.HexToAddress("0x1").Bytes(), Topic0: h('t'), Data: []byte{9}, BlockTimestamp: i64(1)},
+	}
+	writeParquet(t, part0, corrected)
+	writeManifest(t, dir, 7, 1_000_005, map[string]int64{"000": 2, "001": 2})
+	require.ErrorContains(t, l.Finish(ctx), "logs/part=000 was loaded from a different export than manifest.json describes")
+	require.NoError(t, l.Logs(ctx), "the replaced partition reloads although its row count is unchanged")
+	var data []byte
+	require.NoError(t, pool.QueryRow(ctx, `SELECT data FROM eth_logs WHERE block_number = 12`).Scan(&data))
+	assert.Equal(t, []byte{7, 7}, data, "the corrected content is what is stored")
+
 	// A directory missing from the copy (not merely empty) blocks finish even
 	// though eth_blocks is contiguous and every present directory matches.
 	require.NoError(t, os.Rename(filepath.Join(dir, "logs", "part=001"), filepath.Join(dir, "part=001.aside")))

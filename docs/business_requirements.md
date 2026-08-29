@@ -19,7 +19,7 @@ The historical half of that traffic does not need a node at all. The warehouse h
 
 ## 3. Core jobs to be done
 
-1. **Serve `eth_getLogs` exactly** for the NFT event set over full history — go-ethereum's filter semantics, geth's wire shapes and error strings, results ordered by `(blockNumber, logIndex)`, plus `blockTimestamp` on every log so provenance never pays for block headers.
+1. **Serve `eth_getLogs` for the NFT event set over full history** — the vendor's matching semantics on the stored logs (the answer is the vendor's minus the documented never-stored shapes), geth's wire shapes and error strings, results ordered by `(blockNumber, logIndex)`, plus `blockTimestamp` on every log so provenance never pays for block headers.
 2. **Stay current** — follow the chain head and write each block once it is `confirmation_blocks` (2) deep: the served head trails the tip by about two blocks plus one fetch round-trip.
 3. **Be rebuildable** — the entire history loads from the GCS Parquet export (`gs://eth-logs/eth-log-warehouse/v1`) with the `backfill` command; the tail refills from the cursor. There is no state that only exists in the warehouse.
 4. **Refuse rather than approximate** — a filter the warehouse cannot answer exactly (no `topics[0]`, a signature outside the set, a range above the head) is rejected with an out-of-scope error the client routes to the vendor.
@@ -44,7 +44,7 @@ The historical half of that traffic does not need a node at all. The warehouse h
 
 ## 6. Success criteria
 
-- **Exactness** — for an in-scope filter at or below the head, the response is identical to a node's: the rehearsal diffed two live blocks (1,463 raw topic matches → 17 shaped logs) tuple-for-tuple against the extract; the differential test pins geth's `filterLogs` semantics against the SQL reader; no indexer call site switches without a clean shadow comparison on production traffic.
+- **Exactness on the stored set** — for an in-scope filter inside coverage, the response equals the vendor's response minus the documented never-stored shapes (ERC-20 / pre-standard `Transfer`s, nonstandard emitters); verified live on 2026-08-29 against Infura for owner scans, contract provenance, ERC-1155 and CryptoPunks filters (identical) and for a broad `Transfer` window (identical after removing the vendor's <4-topic logs), on backfilled and on tail-written blocks alike.
 - **One query per walk** — a full-history owner scan or token provenance is a single `eth_getLogs` call served from indexed columns, not ~2,600 windows.
 - **Measured size** (probe of 2026-08-28, [docs/probe_2026-08.md](probe_2026-08.md)): **402,266,375** logs to block 25,842,829, modelled at **≈ 205 GB** in PostgreSQL (510 B/log all-in), growing **≈ 1.5 GB/month** (12-month average 2.9 M logs/month).
 - **Currency** — head within ~2 blocks + fetch latency of the tip in steady state; a restart resumes from the durable cursor without gaps.
