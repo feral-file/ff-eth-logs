@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -772,4 +773,184 @@ func TestRun_BatchGivesUpWhenChainKeepsMoving(t *testing.T) {
 	err := f.run(context.Background(), ingestion.Config{}, 100)
 	require.ErrorContains(t, err, "kept changing between log and header fetches for batch 100-100 (3 attempts)")
 	require.Empty(t, f.sink.calls)
+}
+
+// chainServer answers HeadByNumber from a headChain, with per-height
+// overrides a test can change between calls, and records every fetched
+// height so a test can assert what was NOT walked.
+type chainServer struct {
+	c        *headChain
+	override map[uint64][]*chain.BlockHead // consumed in order, then canonical
+	fetched  []uint64
+	onFetch  func(n uint64) // runs after each fetch is recorded (e.g. to swap the chain)
+}
+
+func (s *chainServer) install(f *fixture) {
+	f.client.EXPECT().HeadByNumber(gomock.Any(), gomock.Any()).AnyTimes().
+		DoAndReturn(func(_ context.Context, n uint64) (*chain.BlockHead, error) {
+			s.fetched = append(s.fetched, n)
+			defer func() {
+				if s.onFetch != nil {
+					s.onFetch(n)
+				}
+			}()
+			if q := s.override[n]; len(q) > 0 {
+				h := q[0]
+				s.override[n] = q[1:]
+				return h, nil
+			}
+			return s.c.canonical(n), nil
+		})
+}
+
+func (s *chainServer) count(n uint64) int {
+	k := 0
+	for _, x := range s.fetched {
+		if x == n {
+			k++
+		}
+	}
+	return k
+}
+
+func (s *chainServer) fetchedBetween(lo, hi uint64) []uint64 {
+	var out []uint64
+	for _, x := range s.fetched {
+		if x >= lo && x <= hi {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// TestRun_FarHeadIsVerifiedByNumberNotWalked pins the restart-after-a-gap
+// path: the first head sits far above the anchor (gap > maxBridgeWalk), so
+// reconcile verifies that head with one eth_getBlockByNumber instead of
+// walking every intermediate header; the gap's headers are fetched by
+// number, batch by batch, during the catch-up.
+func TestRun_FarHeadIsVerifiedByNumberNotWalked(t *testing.T) {
+	t.Parallel()
+
+	c := &headChain{}
+	c.anchor(100)
+	c.extend(300)
+	far := c.canonical(300)
+	f := newFixture(t, far)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.sink.seedStored(c, 90, 99)
+	srv := &chainServer{c: c, override: map[uint64][]*chain.BlockHead{}}
+	srv.install(f)
+	f.serveLogs(nil)
+	f.sink.steps = []func(uint64, uint64) error{thenCancel(cancel)}
+
+	err := f.run(ctx, ingestion.Config{}, 100)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, [][2]uint64{{100, 109}}, f.sink.ranges())
+	require.Equal(t, c.canonical(100).Hash, f.sink.calls[0].Blocks[0].Hash)
+	require.Equal(t, 1, srv.count(300), "the far head is verified by number once")
+	require.Empty(t, srv.fetchedBetween(110, 299), "no header of the gap is walked before the first batch")
+}
+
+// TestRun_FarStaleHeadIsDropped pins the other half: a far head the node
+// does not hold canonical is dropped after that single check, and writing
+// waits for a head that is.
+func TestRun_FarStaleHeadIsDropped(t *testing.T) {
+	t.Parallel()
+
+	c := &headChain{}
+	c.anchor(100)
+	c.extend(300)
+	stale := head(300, common.HexToHash("0x57a1e"), common.HexToHash("0xdead"))
+	f := newFixture(t, stale, c.canonical(300))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.sink.seedStored(c, 90, 99)
+	srv := &chainServer{c: c, override: map[uint64][]*chain.BlockHead{}}
+	srv.install(f)
+	f.serveLogs(nil)
+	f.sink.steps = []func(uint64, uint64) error{thenCancel(cancel)}
+
+	err := f.run(ctx, ingestion.Config{}, 100)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, [][2]uint64{{100, 109}}, f.sink.ranges())
+	require.Equal(t, c.canonical(100).Hash, f.sink.calls[0].Blocks[0].Hash)
+}
+
+// TestRun_BatchBoundaryDiscontinuityRewinds pins the continuity check at
+// the batch boundary: the first block of a catch-up batch does not descend
+// from the written block below it (the chain replaced that block right
+// after the resume check), so the deep-reorg recovery runs against the
+// persisted hashes, rewinds to the verified ancestor 99, and the replanned
+// range rewrites 100.. from the new canonical chain.
+func TestRun_BatchBoundaryDiscontinuityRewinds(t *testing.T) {
+	t.Parallel()
+
+	old := &headChain{}
+	old.anchor(101) // canonical 100 is the resume point (cursor = 100)
+	old.extend(300)
+	// The post-reorg chain shares block 99 and diverges from 100 on.
+	reorged := &headChain{seq: 10_000}
+	reorged.store(old.canonical(99))
+	reorged.last = old.canonical(99)
+	reorged.extend(300)
+	far := reorged.canonical(300)
+
+	f := newFixture(t, far)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.sink.seedStored(old, 90, 100) // 100 stored with the old hash, which the node still reports at start
+	srv := &chainServer{c: old, override: map[uint64][]*chain.BlockHead{}}
+	srv.onFetch = func(n uint64) {
+		if n == 100 && srv.c == old {
+			srv.c = reorged // the reorg lands right after the resume check
+		}
+	}
+	srv.install(f)
+	f.serveLogs(nil)
+	f.sink.steps = []func(uint64, uint64) error{thenCancel(cancel)}
+	// After the rewind nothing is queued; deliver the far head again so the
+	// range is replanned from 100.
+	go func() {
+		for len(f.sink.rewinds) == 0 {
+			time.Sleep(5 * time.Millisecond)
+		}
+		f.push(far)
+	}()
+
+	err := f.run(ctx, ingestion.Config{}, 101)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, []uint64{99}, f.sink.rewinds)
+	require.Equal(t, [][2]uint64{{100, 109}}, f.sink.ranges())
+	require.Equal(t, reorged.canonical(100).Hash, f.sink.calls[0].Blocks[0].Hash, "100 is rewritten from the new canonical chain")
+}
+
+// TestRun_MidBatchDiscontinuityRefetches pins the continuity check inside a
+// batch: a header that does not descend from the one fetched for the height
+// below means the chain moved between the two fetches, so the headers are
+// refetched and the batch is written once, linked end to end.
+func TestRun_MidBatchDiscontinuityRefetches(t *testing.T) {
+	t.Parallel()
+
+	c := &headChain{}
+	c.anchor(100)
+	c.extend(300)
+	far := c.canonical(300)
+	f := newFixture(t, far)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.sink.seedStored(c, 90, 99)
+	srv := &chainServer{c: c, override: map[uint64][]*chain.BlockHead{}}
+	srv.override[105] = []*chain.BlockHead{head(105, common.HexToHash("0x105x"), common.HexToHash("0xdead"))}
+	srv.install(f)
+	f.serveLogs(nil)
+	f.sink.steps = []func(uint64, uint64) error{thenCancel(cancel)}
+
+	err := f.run(ctx, ingestion.Config{}, 100)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, [][2]uint64{{100, 109}}, f.sink.ranges())
+	require.Equal(t, 3, srv.count(105), "105: the mismatching fetch, the refetch, and the post-log re-read of a logless block")
+	for i, b := range f.sink.calls[0].Blocks {
+		require.Equal(t, c.canonical(100+uint64(i)).Hash, b.Hash)
+	}
 }

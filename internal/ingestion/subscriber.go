@@ -61,6 +61,16 @@ type Sink interface {
 	Rewind(ctx context.Context, to uint64) error
 }
 
+// maxBridgeWalk bounds how far reconcile walks a head's ancestry down
+// towards the retained chain. A head further above the bridge than this (a
+// restart after a long gap) is verified directly by number instead: walking
+// every intermediate header would be one sequential RPC per block — an hour
+// for a day's gap — done silently, in memory, before the first batch, and
+// lost on a restart. The gap's headers are fetched by number during the
+// catch-up anyway, where each batch is checked for parent continuity against
+// the previous block and committed with the cursor.
+const maxBridgeWalk = 64
+
 // maxForkWalk bounds the search for a deep reorg's common ancestor. Mainnet
 // finality is ~64 blocks; a fork deeper than 1024 is not a reorg to recover
 // from automatically but an incident to look at.
@@ -143,7 +153,9 @@ func (s *Subscriber) Run(ctx context.Context, fromBlock uint64) error {
 			if !ok {
 				continue
 			}
-			if err := s.ingestRange(ctx, &state, from, to); err != nil {
+			if err := s.ingestRange(ctx, &state, from, to); errors.Is(err, errReplan) {
+				continue // the position moved (reorg recovery); the next head replans
+			} else if err != nil {
 				return err
 			}
 			state.advance(to)
@@ -330,6 +342,18 @@ func (s *Subscriber) record(ctx context.Context, st *streamState, h *chain.Block
 	return nil
 }
 
+// nearestRetainedBelow returns the highest retained height below n (0 when
+// none); the retained window is small, so a scan is fine.
+func (st *streamState) nearestRetainedBelow(n uint64) uint64 {
+	var best uint64
+	for k := range st.heads {
+		if k < n && k > best {
+			best = k
+		}
+	}
+	return best
+}
+
 // truncateAbove forgets every retained head above height and makes height the
 // tip: the confirmation depth restarts from the replacement branch.
 func (st *streamState) truncateAbove(height uint64) {
@@ -365,6 +389,16 @@ func (s *Subscriber) reconcile(ctx context.Context, st *streamState, h *chain.Bl
 	// is retained to walk down to; before the first write there is nothing a
 	// reorg could have orphaned, so unretained heights end the walk.
 	_, bridge := st.heads[st.next-1]
+	if bridge && n-st.nearestRetainedBelow(n) > maxBridgeWalk {
+		// Far above everything retained: is the head itself canonical? The
+		// gap below it is verified batch by batch in the catch-up
+		// (blockMetadata checks parent continuity from the block below).
+		canonical, err := s.client.HeadByNumber(ctx, n)
+		if err != nil {
+			return false, false, fmt.Errorf("verify far head %d: %w", n, err)
+		}
+		return canonical.Hash != h.Hash, false, nil
+	}
 	expected := h.ParentHash
 	fetched := 0
 	for k := n - 1; ; k-- {
@@ -567,6 +601,21 @@ func (s *Subscriber) ingestBatch(ctx context.Context, st *streamState, from, to 
 		// Metadata first: it is the chain version the batch is committed to,
 		// and every check below is against it.
 		blocks, err := s.blockMetadata(ctx, st, from, to)
+		var gap *discontinuityError
+		if errors.As(err, &gap) {
+			if gap.height == from {
+				return s.boundaryMoved(ctx, st, from)
+			}
+			if attempt == batchConsistencyAttempts {
+				return fmt.Errorf("batch %d-%d: %w after %d attempts; the chain is unstable at the confirmation depth", from, to, err, attempt)
+			}
+			logger.WarnCtx(ctx, "Chain moved under the batch (parent mismatch); refetching its headers",
+				zap.Uint64("fromBlock", from), zap.Uint64("toBlock", to), zap.Uint64("height", gap.height), zap.Int("attempt", attempt))
+			for n := gap.height - 1; n <= to; n++ {
+				delete(st.heads, n)
+			}
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -608,6 +657,35 @@ func (s *Subscriber) ingestBatch(ctx context.Context, st *streamState, from, to 
 			delete(st.heads, n)
 		}
 	}
+}
+
+// boundaryMoved handles a batch whose first block does not descend from the
+// block held for from-1. When that block is written, the chain replaced it
+// after we wrote it: run the deep-reorg recovery and replan. When nothing is
+// stored there (the start anchor of an empty warehouse), the anchor itself
+// was reorged: re-fetch it and retry the range.
+func (s *Subscriber) boundaryMoved(ctx context.Context, st *streamState, from uint64) error {
+	_, stored, err := s.sink.StoredBlockHash(ctx, from-1)
+	if err != nil {
+		return err
+	}
+	if stored {
+		if err := s.recoverDeepReorg(ctx, st, from-1); err != nil {
+			return err
+		}
+		return errReplan
+	}
+	anchor, err := s.client.HeadByNumber(ctx, from-1)
+	if err != nil {
+		return fmt.Errorf("re-anchor at %d: %w", from-1, err)
+	}
+	logger.WarnCtx(ctx, "Start anchor was replaced by a reorg; re-anchoring", zap.Uint64("height", from-1))
+	st.heads[from-1] = anchor
+	for n := from; n <= st.tip; n++ {
+		delete(st.heads, n)
+	}
+	st.tip = from - 1
+	return errReplan
 }
 
 // recheckLoglessBlocks re-reads the canonical header of every batch block
@@ -660,11 +738,30 @@ func disagreeingHeights(logs []types.Log, blocks []logstore.Block) []uint64 {
 	return out
 }
 
+// discontinuityError reports a block whose parent hash is not the hash held
+// for the previous height: the chain moved under the batch (or, at the batch
+// boundary, under the last written block).
+type discontinuityError struct{ height uint64 }
+
+func (e *discontinuityError) Error() string {
+	return fmt.Sprintf("block %d does not descend from the block held for %d", e.height, e.height-1)
+}
+
+// errReplan tells Run that the stream position changed under a range (a
+// deep-reorg recovery) and the range must be planned again from the next head.
+var errReplan = errors.New("stream position changed; replan from the next head")
+
 // blockMetadata returns (number, hash, timestamp) for every block in
 // [from, to], from the retained heads when the subscription delivered them
-// (steady state) and from eth_getBlockByNumber otherwise (catch-up).
+// (steady state) and from eth_getBlockByNumber otherwise (catch-up), and
+// checks that each block descends from the one held for the height below —
+// including the boundary block from-1 (the last written block, or the
+// start anchor). This is what makes a catch-up over a gap trustworthy
+// without walking the gap's ancestry up front: every batch links to the
+// previous one, and the link is committed with the batch.
 func (s *Subscriber) blockMetadata(ctx context.Context, st *streamState, from, to uint64) ([]logstore.Block, error) {
 	blocks := make([]logstore.Block, 0, to-from+1)
+	prev, hasPrev := st.heads[from-1]
 	for n := from; n <= to; n++ {
 		head, ok := st.heads[n]
 		if !ok {
@@ -674,6 +771,10 @@ func (s *Subscriber) blockMetadata(ctx context.Context, st *streamState, from, t
 			}
 			st.heads[n] = head
 		}
+		if hasPrev && head.ParentHash != prev.Hash {
+			return nil, &discontinuityError{height: n}
+		}
+		prev, hasPrev = head, true
 		blocks = append(blocks, logstore.Block{Number: n, Hash: head.Hash, Timestamp: uint64(head.Timestamp)})
 	}
 	return blocks, nil
