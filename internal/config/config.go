@@ -216,5 +216,8 @@ func Validate(cfg *Config) error {
 	if cfg.RPC.MaxResults < 0 {
 		return errors.New("rpc.max_results must be >= 0")
 	}
+	if cfg.RPC.QueryTimeout <= 0 {
+		return errors.New("rpc.query_timeout must be > 0: it bounds every warehouse read (eth_getLogs, eth_blockNumber, /health)")
+	}
 	return nil
 }

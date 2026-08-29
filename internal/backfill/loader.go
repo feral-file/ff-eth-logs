@@ -70,9 +70,33 @@ func unitInterval(m *Manifest, part uint64) (lo, hi uint64) {
 	return lo, hi
 }
 
+// preflightCoverage refuses a backfill whose manifest interval could never
+// be published: finish merges the verified interval into the existing
+// coverage and requires the two to touch, so a warehouse that started as a
+// tail-only deployment far above the export end must be recreated before a
+// historical backfill — better to learn that before the load than after.
+func (l *Loader) preflightCoverage(ctx context.Context) error {
+	m, err := readManifest(l.dir)
+	if err != nil {
+		return err
+	}
+	cov, ok, err := logstore.NewFromPool(l.pool).Coverage(ctx)
+	if err != nil {
+		return err
+	}
+	if ok && (m.Blocks.First > cov.Head+1 || m.Blocks.Last+1 < cov.Start) {
+		return fmt.Errorf("%w: the export covers blocks %d-%d but the warehouse already publishes %d-%d (a tail-only start); recreate the database (make clean) and run the backfill before starting ingestion",
+			logstore.ErrCoverageGap, m.Blocks.First, m.Blocks.Last, cov.Start, cov.Head)
+	}
+	return nil
+}
+
 // Prepare drops the secondary indexes so the bulk load only maintains the
 // primary key.
 func (l *Loader) Prepare(ctx context.Context) error {
+	if err := l.preflightCoverage(ctx); err != nil {
+		return err
+	}
 	for _, idx := range logstore.SecondaryIndexes {
 		if _, err := l.pool.Exec(ctx, "DROP INDEX IF EXISTS "+idx.Name); err != nil {
 			return fmt.Errorf("drop index %s: %w", idx.Name, err)
@@ -93,6 +117,9 @@ func (l *Loader) Prepare(ctx context.Context) error {
 // manifest (see Manifest) before it writes the cursor row. Until then the
 // API reports the warehouse as empty rather than serving a partial history.
 func (l *Loader) Finish(ctx context.Context) error {
+	if err := l.preflightCoverage(ctx); err != nil {
+		return err
+	}
 	cov, err := l.verifyLoaded(ctx)
 	if err != nil {
 		return fmt.Errorf("backfill is not complete, cursor not set: %w", err)
@@ -261,6 +288,9 @@ func isDuplicateRelation(err error) bool {
 
 // Logs loads every partition the manifest interval implies, in order.
 func (l *Loader) Logs(ctx context.Context) error {
+	if err := l.preflightCoverage(ctx); err != nil {
+		return err
+	}
 	m, err := readManifest(l.dir)
 	if err != nil {
 		return err
@@ -375,6 +405,9 @@ func (l *Loader) loadPart(ctx context.Context, m *Manifest, part uint64) error {
 // the manifest interval here makes the manifest — not the longer blocks
 // export — the authority on what is covered.
 func (l *Loader) Blocks(ctx context.Context) error {
+	if err := l.preflightCoverage(ctx); err != nil {
+		return err
+	}
 	m, err := readManifest(l.dir)
 	if err != nil {
 		return err

@@ -34,7 +34,7 @@ make setup
 make quickstart
 ```
 
-This starts **PostgreSQL** (host port `5433`, schema from `db/init_pg_db.sql`) and **ff-eth-logs** (JSON-RPC on `http://localhost:8545`). A fresh warehouse is empty and starts ingesting at the chain head; it then serves only that tail (`coverage_start` in `/health`) and refuses history below it until the backfill described in [docs/operations.md](docs/operations.md) has run.
+This starts **PostgreSQL** (host port `5433`, schema from `db/init_pg_db.sql`) and **ff-eth-logs** (JSON-RPC on `http://localhost:8545`). A fresh warehouse is empty and starts ingesting at the chain head, so this is a **tail-only, disposable** setup: it serves only the blocks it has followed (`coverage_start` in `/health`) and refuses history below them. Its coverage sits far above the export's end, so it cannot later be extended with the historical backfill — every backfill stage refuses such a warehouse up front (`the export covers blocks … but the warehouse already publishes …`). For a warehouse with history, load the export **before** starting ingestion: `make up-infra`, then `make backfill DIR=/data/v1`, then `make up-app` ([docs/operations.md](docs/operations.md) §1); to convert a Quick Start database, recreate it first (`make clean`).
 
 **Configuration**: YAML config file plus `FF_ETH_LOGS_*` environment variables; environment values override the file. See [DEVELOPMENT.md](DEVELOPMENT.md).
 

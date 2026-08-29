@@ -55,6 +55,8 @@ Assemble the three into `manifest.json`, upload it next to the export (`gs://eth
 
 ### 1.3 Run the backfill
 
+The backfill goes into an **empty** warehouse, before the service ever ingests. A database that has already followed the chain head (a tail-only start) publishes coverage far above the export's end, and `finish` could never merge the two intervals — so every stage refuses it up front (`the export covers blocks A-B but the warehouse already publishes X-Y (a tail-only start); recreate the database …`). Recreate the database and load first.
+
 With the service **not running** (or `ethereum.ingestion_enabled=false`) on the empty warehouse:
 
 ```bash

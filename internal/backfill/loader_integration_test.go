@@ -102,6 +102,28 @@ func writeParquet[T any](t *testing.T, path string, rows []T) {
 	require.NoError(t, f.Close())
 }
 
+// TestBackfillRefusesTailOnlyWarehouse pins the preflight: a database that
+// started ingesting at the chain head (Quick Start) publishes coverage far
+// above the export, which finish could never merge, so every stage refuses
+// up front instead of after an expensive load.
+func TestBackfillRefusesTailOnlyWarehouse(t *testing.T) {
+	ctx := context.Background()
+	pool := testdb.Open(t)
+	dir := t.TempDir()
+	writeParquet(t, filepath.Join(dir, "logs", "part=000", "logs-000000000000.parquet"), []exportLog{})
+	writeParquet(t, filepath.Join(dir, "blocks", "blocks-000000000000.parquet"), gapFill(0, 5))
+	writeManifest(t, dir, 0, 5, map[string]int64{"000": 0})
+	store := logstore.NewFromPool(pool)
+	require.NoError(t, store.WriteRange(ctx, 5_000_000, 5_000_001, tailBlocks(5_000_000, 5_000_001), nil))
+
+	l := New(pool, dir)
+	for name, stage := range map[string]func(context.Context) error{"prepare": l.Prepare, "logs": l.Logs, "blocks": l.Blocks, "finish": l.Finish} {
+		err := stage(ctx)
+		require.ErrorIs(t, err, logstore.ErrCoverageGap, name)
+		require.ErrorContains(t, err, "the export covers blocks 0-5 but the warehouse already publishes 5000000-5000001", name)
+	}
+}
+
 func TestLoaderEndToEnd(t *testing.T) {
 	ctx := context.Background()
 	pool := testdb.Open(t)

@@ -84,12 +84,18 @@ func (a *API) BlockNumber(ctx context.Context) (hexutil.Uint64, error) {
 // through it — eth_getLogs, eth_blockNumber and /health alike — so a live
 // but unresponsive database connection cannot hold a request (or the
 // routing client's head lookup, or the health check) past the timeout.
+// config.Validate rejects a non-positive timeout; the fallback here only
+// covers a Config built without validation (tests).
 func (a *API) bounded(ctx context.Context) (context.Context, context.CancelFunc) {
 	if a.cfg.QueryTimeout > 0 {
 		return context.WithTimeout(ctx, a.cfg.QueryTimeout)
 	}
-	return context.WithCancel(ctx)
+	return context.WithTimeout(ctx, DefaultQueryTimeout)
 }
+
+// DefaultQueryTimeout bounds warehouse reads when the API is constructed
+// without a configured timeout.
+const DefaultQueryTimeout = 60 * time.Second
 
 // coverage reads the covered interval, refusing an empty warehouse.
 func (a *API) coverage(ctx context.Context) (logstore.Coverage, error) {

@@ -49,7 +49,7 @@ func TestDSNEscapesCredentials(t *testing.T) {
 
 func TestValidate(t *testing.T) {
 	base := func() *Config {
-		return &Config{Database: DatabaseConfig{Host: "h"}, Ethereum: EthereumConfig{WebSocketURL: "wss://x", ChainID: 1, IngestionEnabled: true, ConfirmationBlocks: 2, MaxCatchupBlocks: 100}}
+		return &Config{Database: DatabaseConfig{Host: "h"}, Ethereum: EthereumConfig{WebSocketURL: "wss://x", ChainID: 1, IngestionEnabled: true, ConfirmationBlocks: 2, MaxCatchupBlocks: 100}, RPC: RPCConfig{QueryTimeout: time.Second}}
 	}
 	require.NoError(t, Validate(base()))
 
@@ -76,6 +76,12 @@ func TestValidate(t *testing.T) {
 	c = base()
 	c.RPC.MaxResults = -1
 	assert.ErrorContains(t, Validate(c), "max_results")
+
+	for _, d := range []time.Duration{0, -time.Second} {
+		c = base()
+		c.RPC.QueryTimeout = d
+		assert.ErrorContains(t, Validate(c), "rpc.query_timeout must be > 0", d)
+	}
 }
 
 func TestLoadMissingFileUsesEnv(t *testing.T) {
