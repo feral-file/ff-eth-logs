@@ -104,7 +104,7 @@ The stages are idempotent, so the same command resumes after a failure. To reloa
 
 Never run `backfill` while ingestion is writing: `finish` would publish coverage from `eth_blocks` under a concurrent writer, and `prepare` would drop the indexes the API is serving from.
 
-On start, ingestion verifies the provider with `eth_chainId`; a mismatch (`provider chain id X does not match configured ethereum.chain_id Y`) is fatal before any block is written. A `start_block` that is not contiguous with the current coverage is refused at the first write (`write is not contiguous with warehouse coverage`): rewind to it instead, or unset it.
+On start, ingestion verifies the provider with `eth_chainId`; a mismatch (`provider chain id X does not match configured ethereum.chain_id Y`) is fatal before any block is written. A non-zero `ethereum.start_block` is refused at start once a cursor exists (`ethereum.start_block=N is set but the warehouse already has a cursor at C; unset it … or … run \`ff-eth-logs rewind -to N-1\``): a persistent setting would bypass the durable cursor on every restart. To re-ingest from a height deliberately: stop the service, `rewind -to <height-1>`, keep `start_block` at 0, start.
 
 ## 5. Rebuilding from scratch
 

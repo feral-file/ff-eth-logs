@@ -28,9 +28,12 @@ type RunConfig struct {
 	// ChainID is the chain the warehouse stores; the provider must report it
 	// (eth_chainId) before a single block is written.
 	ChainID uint64
-	// StartBlock, when non-zero, overrides the cursor unconditionally — a
-	// deliberate rewind or a first run without a backfill. A start block
-	// further behind the head than MaxCatchupBlocks is a startup failure.
+	// StartBlock, when non-zero, is where a warehouse with no cursor starts.
+	// It is refused once a cursor exists: a persistent setting would bypass
+	// the durable cursor on every restart, drift behind the tip until the
+	// catch-up bound kills the process, and replay inside an interval whose
+	// coverage head keeps advertising blocks the replay means to replace.
+	// A deliberate re-ingest is `ff-eth-logs rewind` with the setting unset.
 	StartBlock uint64
 	// SpanCap is the provider's eth_getLogs block-range cap (0 = unknown).
 	SpanCap uint64
@@ -68,19 +71,24 @@ func verifyChain(ctx context.Context, want uint64, client chain.EthClient) error
 	return nil
 }
 
-// resolveStartBlock mirrors the indexer: an explicit start_block wins; else
-// the cursor + 1 (the cursor is the last written block); else the current
-// head, which leaves history to the backfill.
+// resolveStartBlock: the cursor + 1 when one exists (the cursor is the last
+// written block; a configured start_block is then an error, see RunConfig);
+// else start_block; else the current head, which leaves history to the
+// backfill.
 func resolveStartBlock(ctx context.Context, cfg RunConfig, client chain.EthClient, store CursorStore) (uint64, error) {
-	if cfg.StartBlock != 0 {
-		return cfg.StartBlock, nil
-	}
 	cursor, ok, err := store.Cursor(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("read ingestion cursor: %w", err)
 	}
 	if ok {
+		if cfg.StartBlock != 0 {
+			return 0, fmt.Errorf("ethereum.start_block=%d is set but the warehouse already has a cursor at %d; unset it (to resume at %d) or stop the service and run `ff-eth-logs rewind -to %d` to re-ingest from it",
+				cfg.StartBlock, cursor, cursor+1, cfg.StartBlock-1)
+		}
 		return cursor + 1, nil
+	}
+	if cfg.StartBlock != 0 {
+		return cfg.StartBlock, nil
 	}
 	head, err := client.BlockNumber(ctx)
 	if err != nil {

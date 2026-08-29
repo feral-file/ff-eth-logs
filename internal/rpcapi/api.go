@@ -50,8 +50,10 @@ func NewAPI(store Warehouse, cfg Config) *API { return &API{store: store, cfg: c
 
 // ScopeError is returned for a request the warehouse cannot answer exactly:
 // a block outside the covered interval, a signature outside the event set, a
-// filter without a topic0, or a CryptoPunks signature not pinned to the
-// CryptoPunks contract. It carries JSON-RPC code -32000 (geth's default for
+// filter without a topic0, a Transfer-family filter without the four
+// positions that exclude unstored shapes, a metadata/URI signature (no
+// filter can pin its stored shape), or a CryptoPunks signature not pinned
+// to the CryptoPunks contract. It carries JSON-RPC code -32000 (geth's default for
 // handler errors) and a message that deliberately avoids the words a
 // range-cap classifier keys on ("range", "limit", "too many"), so a client
 // treats it as out-of-scope rather than as a window to halve.
@@ -156,10 +158,29 @@ func checkTopicScope(topics [][]common.Hash, addresses []common.Address) error {
 		if !eventset.IsWarehouseSignature(sig) {
 			return &ScopeError{Reason: fmt.Sprintf("topic0 %s is not a warehouse event signature", sig.Hex())}
 		}
+		if err := checkShapeScope(sig, len(topics)); err != nil {
+			return err
+		}
 		punks = punks || eventset.IsCryptoPunksSignature(sig)
 	}
 	if punks && !onlyCryptoPunks(addresses) {
 		return &ScopeError{Reason: fmt.Sprintf("CryptoPunks signatures are stored only for %s; restrict address to it", eventset.CryptoPunksAddress.Hex())}
+	}
+	return nil
+}
+
+// checkShapeScope refuses a filter whose position count would let a node
+// return shapes the warehouse does not store (see eventset.RequiredPositions).
+func checkShapeScope(sig common.Hash, positions int) error {
+	if eventset.IsCryptoPunksSignature(sig) {
+		return nil // every shape from the CryptoPunks contract is stored
+	}
+	need, ok := eventset.RequiredPositions(sig)
+	if !ok {
+		return &ScopeError{Reason: fmt.Sprintf("topic0 %s is stored only in its standard shape, which no filter can pin; ask a node", sig.Hex())}
+	}
+	if positions != need {
+		return &ScopeError{Reason: fmt.Sprintf("topic0 %s needs a %d-position topics filter (wildcards allowed) to exclude the shapes the warehouse does not store", sig.Hex(), need)}
 	}
 	return nil
 }

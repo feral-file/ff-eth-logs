@@ -90,6 +90,27 @@ func IsWarehouseSignature(topic0 common.Hash) bool {
 	return ok
 }
 
+// RequiredPositions returns, for a standard signature, the number of topic
+// positions an eth_getLogs filter must carry for the stored shape to be the
+// only shape a node could return, and ok=false when no filter can pin it.
+//
+// Reason: a filter with N positions matches logs with at least N topics. The
+// Transfer family is stored only with 4 topics, and 4 is the maximum, so a
+// 4-position filter is exact — while [[Transfer]] alone would also match
+// 3-topic ERC-20 and 1-topic pre-standard logs on a node that the warehouse
+// does not hold. MetadataUpdate / BatchMetadataUpdate (1 topic) and URI
+// (2 topics) are stored only in their standard shape, but a ≥1 or ≥2 filter
+// would also match nonstandard emitters with extra indexed arguments on a
+// node, so no filter over them can be answered exactly; the API refuses
+// them until every shape of those signatures is stored.
+func RequiredPositions(topic0 common.Hash) (positions int, ok bool) {
+	want, isStandard := topicCount[topic0]
+	if !isStandard || want != 4 {
+		return 0, false
+	}
+	return 4, true
+}
+
 // IsCryptoPunksSignature reports whether topic0 is one of the three
 // address-scoped CryptoPunks signatures.
 func IsCryptoPunksSignature(topic0 common.Hash) bool {

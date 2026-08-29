@@ -42,19 +42,33 @@ func runnerFixture(t *testing.T, headHeight uint64, store *fakeStore) (*fixture,
 	return f, c, ctx
 }
 
-// TestRun_StartBlockOverridesCursor pins that an explicit start_block wins
-// unconditionally: the cursor is not consulted and writing starts there. The
-// tight catch-up bound would reject a start from the (older) cursor.
-func TestRun_StartBlockOverridesCursor(t *testing.T) {
+// TestRun_StartBlockStartsAnEmptyWarehouse pins that start_block is where a
+// warehouse with no cursor begins (a first run without a backfill).
+func TestRun_StartBlockStartsAnEmptyWarehouse(t *testing.T) {
 	t.Parallel()
 
-	store := &fakeStore{cursor: 200, hasCursor: true}
+	store := &fakeStore{}
 	f, _, ctx := runnerFixture(t, 500, store)
 
 	err := ingestion.Run(ctx, ingestion.RunConfig{ChainID: 1, Config: ingestion.Config{MaxCatchupBlocks: 10}, StartBlock: 500}, f.client, store)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Equal(t, [][2]uint64{{500, 500}}, store.ranges())
-	require.Zero(t, store.cursorHit, "start_block must not read the cursor")
+}
+
+// TestRun_StartBlockRefusedOnceCursorExists pins that a persistent
+// start_block cannot bypass the durable cursor: with a cursor present the
+// run refuses before subscribing, naming the rewind workflow instead.
+func TestRun_StartBlockRefusedOnceCursorExists(t *testing.T) {
+	t.Parallel()
+
+	ctrl := gomock.NewController(t)
+	client := mocks.NewMockEthClient(ctrl)
+	client.EXPECT().ChainID(gomock.Any()).Return(uint64(1), nil)
+	store := &fakeStore{cursor: 200, hasCursor: true}
+
+	err := ingestion.Run(context.Background(), ingestion.RunConfig{ChainID: 1, StartBlock: 150}, client, store)
+	require.EqualError(t, err, "ethereum.start_block=150 is set but the warehouse already has a cursor at 200; unset it (to resume at 201) or stop the service and run `ff-eth-logs rewind -to 149` to re-ingest from it")
+	require.Empty(t, store.calls)
 }
 
 // TestRun_ResumesFromCursorPlusOne pins the restart path: the cursor is the

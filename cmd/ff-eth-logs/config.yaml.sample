@@ -27,7 +27,7 @@ ethereum:
   websocket_url: ""      # required when ingestion_enabled; newHeads + eth_getLogs on one connection
   chain_id: 1
   ingestion_enabled: true
-  start_block: 0         # non-zero overrides the cursor (deliberate rewind / first run without backfill)
+  start_block: 0         # where an empty warehouse starts; refused once a cursor exists (rewind instead)
   confirmation_blocks: 2 # blocks are written this far behind the tip; the reorg strategy
   max_catchup_blocks: 50000
   getlogs_span_cap: 10000 # provider eth_getLogs block-range cap (Chainstack 10100, Infura 10000)

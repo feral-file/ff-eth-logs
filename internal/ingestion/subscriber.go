@@ -536,21 +536,40 @@ const batchConsistencyAttempts = 3
 // writes blocks + logs + cursor atomically — but only once the logs and the
 // block metadata describe the same chain.
 //
-// Reason: eth_getLogs and the block headers are two calls (and the headers
-// may be retained from an earlier notification). A reorg landing between
-// them would pair old-branch logs with new-branch hashes, and a later fork
-// walk would then trust those hashes and stop above the stale logs. Every
-// log carries the hash of the block it came from, so the batch is accepted
-// only when each log's blockHash equals the metadata hash for its height;
-// otherwise the retained heads for the disagreeing heights are dropped (so
-// they are refetched canonical) and the whole batch is fetched again.
-// Trade-offs: a provider that omits blockHash cannot be verified this way
-// (the zero hash is skipped); mainnet providers always populate it.
+// Reason: eth_getLogs and the block headers are separate reads (and the
+// headers may be retained from an earlier notification). A reorg landing
+// between them would pair old-branch logs with new-branch hashes — or store
+// a new-branch hash for a block whose only warehouse log exists on that new
+// branch and was never fetched — and a later fork walk would then trust
+// those hashes and stop above the damage. So: the metadata is read first;
+// every raw log's blockHash must equal the metadata hash for its height; and
+// every block that returned no raw log is re-read from the node after the
+// log fetch and must still carry the metadata hash. Otherwise the retained
+// heads for the disagreeing heights are dropped (refetched canonical) and
+// the whole batch is fetched again. Trade-offs: a provider that omits
+// blockHash cannot be verified through its logs (the zero hash is skipped);
+// mainnet providers always populate it.
 func (s *Subscriber) ingestBatch(ctx context.Context, st *streamState, from, to uint64) error {
 	for attempt := 1; ; attempt++ {
+		// Metadata first: it is the chain version the batch is committed to,
+		// and every check below is against it.
+		blocks, err := s.blockMetadata(ctx, st, from, to)
+		if err != nil {
+			return err
+		}
 		logs, err := s.fetcher.FetchIngestionLogs(ctx, from, to)
 		if err != nil {
 			return fmt.Errorf("fetch ingestion logs for blocks %d-%d: %w", from, to, err)
+		}
+		// Raw logs (before the shape filter) carry the block hash of the chain
+		// the node answered from; a block that returned no raw log at all is
+		// re-read from the node after the log fetch, so a block whose logs
+		// exist only on the other branch cannot slip through unverified.
+		moved := disagreeingHeights(logs, blocks)
+		if len(moved) == 0 {
+			if moved, err = s.recheckLoglessBlocks(ctx, logs, blocks); err != nil {
+				return err
+			}
 		}
 		kept := logs[:0]
 		for _, l := range logs {
@@ -558,11 +577,6 @@ func (s *Subscriber) ingestBatch(ctx context.Context, st *streamState, from, to 
 				kept = append(kept, l)
 			}
 		}
-		blocks, err := s.blockMetadata(ctx, st, from, to)
-		if err != nil {
-			return err
-		}
-		moved := disagreeingHeights(kept, blocks)
 		if len(moved) == 0 {
 			if err := s.sink.WriteRange(ctx, from, to, blocks, kept); err != nil {
 				return fmt.Errorf("write blocks %d-%d: %w", from, to, err)
@@ -581,6 +595,33 @@ func (s *Subscriber) ingestBatch(ctx context.Context, st *streamState, from, to 
 			delete(st.heads, n)
 		}
 	}
+}
+
+// recheckLoglessBlocks re-reads the canonical header of every batch block
+// that returned no raw log and reports the heights whose hash differs from
+// the metadata: with no log to carry the chain version, only a second read
+// after the log fetch proves the block did not change during it. On mainnet
+// virtually every block carries an ERC-20 Transfer (in the raw filter), so
+// this rarely costs a call.
+func (s *Subscriber) recheckLoglessBlocks(ctx context.Context, logs []types.Log, blocks []logstore.Block) ([]uint64, error) {
+	withLogs := make(map[uint64]struct{}, len(blocks))
+	for _, l := range logs {
+		withLogs[l.BlockNumber] = struct{}{}
+	}
+	var moved []uint64
+	for _, b := range blocks {
+		if _, ok := withLogs[b.Number]; ok {
+			continue
+		}
+		canonical, err := s.client.HeadByNumber(ctx, b.Number)
+		if err != nil {
+			return nil, fmt.Errorf("re-read block %d after the log fetch: %w", b.Number, err)
+		}
+		if canonical.Hash != b.Hash {
+			moved = append(moved, b.Number)
+		}
+	}
+	return moved, nil
 }
 
 // disagreeingHeights returns the block numbers whose logs report a different

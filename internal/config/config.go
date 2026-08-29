@@ -62,7 +62,8 @@ type EthereumConfig struct {
 	ChainID      uint64 `mapstructure:"chain_id"`
 	// IngestionEnabled lets an API-only replica run without following the chain.
 	IngestionEnabled bool `mapstructure:"ingestion_enabled"`
-	// StartBlock, when non-zero, overrides the cursor. See ingestion.RunConfig.
+	// StartBlock, when non-zero, is where an empty warehouse starts; refused
+	// once a cursor exists. See ingestion.RunConfig.
 	StartBlock uint64 `mapstructure:"start_block"`
 	// ConfirmationBlocks is the reorg strategy: blocks are written this many
 	// blocks behind the tip. Post-merge mainnet reorgs are almost always one

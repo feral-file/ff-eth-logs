@@ -64,7 +64,7 @@ The binary supports **dual configuration**: a YAML file and `FF_ETH_LOGS_*` envi
 | `ethereum.websocket_url` | — | **Required when `ingestion_enabled`**; `newHeads` + `eth_getLogs` on one connection |
 | `ethereum.chain_id` | `1` | What `eth_chainId` and `/health` report |
 | `ethereum.ingestion_enabled` | `true` | `false` serves the stored head only (API-only replica) |
-| `ethereum.start_block` | `0` | Non-zero overrides the cursor unconditionally |
+| `ethereum.start_block` | `0` | Where an empty warehouse starts; refused once a cursor exists (use `rewind` and unset it) |
 | `ethereum.confirmation_blocks` | `2` | Blocks are written this far behind the tip; must be below `max_catchup_blocks` |
 | `ethereum.max_catchup_blocks` | `50000` | Largest cursor-to-tip gap walked on start; `0` = unbounded |
 | `ethereum.getlogs_span_cap` | `10000` | Provider `eth_getLogs` block-range cap (`toBlock - fromBlock`); `0` = discover by rejection |
@@ -208,7 +208,7 @@ make logs
 
 ## Tips
 
-1. Point `ethereum.start_block` at a recent height for a local run without a backfill, then set it back to `0` so the cursor takes over.
+1. Point `ethereum.start_block` at a recent height for a local run without a backfill; set it back to `0` before the next start — with a cursor present the service refuses to start while it is set.
 2. Use `ethereum.ingestion_enabled=false` to iterate on the API against a loaded database without an RPC key.
 3. Compare answers with a node: the same `eth_getLogs` body sent to the vendor and to `:8545` must return identical arrays for an in-scope filter at or below the head.
 4. `psql -c "SELECT * FROM ingest_cursor"` shows the head and when it last moved.

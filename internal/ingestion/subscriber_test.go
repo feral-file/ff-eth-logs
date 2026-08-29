@@ -267,14 +267,23 @@ func (f *fixture) expectHead(n uint64, h *chain.BlockHead) *gomock.Call {
 	return f.client.EXPECT().HeadByNumber(gomock.Any(), n).Return(h, nil)
 }
 
-// expectMetadataHeads pins the ascending metadata fetches a catch-up over
-// [from, to] makes for heights no subscription head covered.
+// expectMetadataHeads pins the ascending metadata fetches a batch over
+// [from, to] makes, before its log fetch, for heights no subscription head
+// covered.
 func (f *fixture) expectMetadataHeads(c *headChain, from, to uint64) []*gomock.Call {
 	var calls []*gomock.Call
 	for n := from; n <= to; n++ {
 		calls = append(calls, f.expectHead(n, c.canonical(n)))
 	}
 	return calls
+}
+
+// expectRecheckHeads pins the ascending re-reads a batch over [from, to]
+// makes after its log fetch for every block that returned no raw log,
+// answering with the chain's head at each height — the one the metadata
+// used, so the batch is accepted without a refetch.
+func (f *fixture) expectRecheckHeads(c *headChain, from, to uint64) []*gomock.Call {
+	return f.expectMetadataHeads(c, from, to)
 }
 
 func inOrder(calls ...*gomock.Call) {
@@ -394,7 +403,8 @@ func TestRun_CoalescesQueuedHeads(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	f.expectLogs(100, 102)
+	// One fetch for the coalesced range; the logless blocks are re-read after it.
+	inOrder(append([]*gomock.Call{f.expectLogs(100, 102)}, f.expectRecheckHeads(c, 100, 102)...)...)
 	f.sink.steps = []func(uint64, uint64) error{thenCancel(cancel)}
 
 	err := f.run(ctx, ingestion.Config{}, 100)
@@ -413,7 +423,10 @@ func TestRun_WritesOnlyConfirmedBlocks(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	inOrder(f.expectLogs(100, 100), f.expectLogs(101, 101))
+	inOrder(
+		f.expectLogs(100, 100), f.expectHead(100, c.canonical(100)),
+		f.expectLogs(101, 101), f.expectHead(101, c.canonical(101)),
+	)
 	f.sink.steps = []func(uint64, uint64) error{thenPush(f.push, c.next(103)), thenCancel(cancel)}
 
 	err := f.run(ctx, ingestion.Config{ConfirmationBlocks: 2}, 100)
@@ -454,8 +467,12 @@ func TestRun_DuplicateHeadAtWrittenHeightIsIgnored(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	inOrder(f.expectLogs(100, 100), f.expectLogs(101, 101))
-	f.sink.steps = []func(uint64, uint64) error{thenPush(f.push, h100, c.next(101)), thenCancel(cancel)}
+	h101 := c.next(101)
+	inOrder(
+		f.expectLogs(100, 100), f.expectHead(100, h100),
+		f.expectLogs(101, 101), f.expectHead(101, h101),
+	)
+	f.sink.steps = []func(uint64, uint64) error{thenPush(f.push, h100, h101), thenCancel(cancel)}
 
 	err := f.run(ctx, ingestion.Config{}, 100)
 	require.ErrorIs(t, err, context.Canceled)
@@ -469,13 +486,18 @@ func TestRun_FutureStartBlockIsHardLowerBound(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
-	f := newFixture(t, c.next(400), c.next(401), c.next(500))
+	h400, h401 := c.next(400), c.next(401)
+	h500 := c.next(500)
+	f := newFixture(t, h400, h401, h500)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	h501 := c.next(501)
 	below := c.fork(499) // a replacement below the start block: ignored
-	inOrder(f.expectLogs(500, 500), f.expectLogs(501, 501))
+	inOrder(
+		f.expectLogs(500, 500), f.expectHead(500, h500),
+		f.expectLogs(501, 501), f.expectHead(501, h501),
+	)
 	f.sink.steps = []func(uint64, uint64) error{thenPush(f.push, below, h501), thenCancel(cancel)}
 
 	err := f.run(ctx, ingestion.Config{}, 500)
@@ -569,7 +591,12 @@ func TestRun_CatchupBoundCoversPendingWindow(t *testing.T) {
 		defer cancel()
 
 		boundary := head(107, common.HexToHash("0x107"), common.HexToHash("0x106"))
-		inOrder(append([]*gomock.Call{f.expectHead(107, boundary), f.expectLogs(100, 107)}, f.expectMetadataHeads(c, 100, 106)...)...)
+		calls := []*gomock.Call{f.expectHead(107, boundary)}         // written boundary retained
+		calls = append(calls, f.expectMetadataHeads(c, 100, 106)...) // metadata first, then the logs
+		calls = append(calls, f.expectLogs(100, 107))
+		calls = append(calls, f.expectRecheckHeads(c, 100, 106)...) // no logs: every block is re-read
+		calls = append(calls, f.expectHead(107, boundary))
+		inOrder(calls...)
 		f.sink.steps = []func(uint64, uint64) error{thenCancel(cancel)}
 
 		err := f.run(ctx, cfg, 100)

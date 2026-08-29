@@ -35,6 +35,7 @@ func TestServerRoundTripWithEthclient(t *testing.T) {
 	logs := []types.Log{
 		{BlockNumber: 5, Index: 1, Address: common.HexToAddress("0xc0"), Topics: []common.Hash{eventset.Transfer, common.HexToHash("0x1"), owner, common.HexToHash("0x9")}, Data: []byte{}, TxHash: common.HexToHash("0xf5"), TxIndex: 2},
 		{BlockNumber: 6, Index: 0, Address: common.HexToAddress("0xc0"), Topics: []common.Hash{eventset.Transfer, owner, common.HexToHash("0x2")}, Data: []byte{}, TxHash: common.HexToHash("0xf6")},
+		{BlockNumber: 6, Index: 1, Address: common.HexToAddress("0xc0"), Topics: []common.Hash{eventset.Transfer, common.HexToHash("0x3"), common.HexToHash("0x4"), common.HexToHash("0x9")}, Data: []byte{}, TxHash: common.HexToHash("0xf7")},
 	}
 	require.NoError(t, store.WriteRange(ctx, 5, 6, blocks, logs))
 
@@ -56,38 +57,42 @@ func TestServerRoundTripWithEthclient(t *testing.T) {
 	assert.Equal(t, int64(1), chainID.Int64())
 
 	got, err := client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(5), ToBlock: big.NewInt(6),
-		Topics: [][]common.Hash{{eventset.Transfer}, nil, {owner}}})
+		Topics: [][]common.Hash{{eventset.Transfer}, nil, {owner}, nil}})
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	want := logs[0]
 	want.BlockHash, want.BlockTimestamp = blocks[0].Hash, blocks[0].Timestamp
 	assert.Equal(t, want, got[0])
 
-	// A 4-position filter excludes the 3-topic log, as on a node.
+	// The 4-position filter excludes the 3-topic log, as on a node; a
+	// 3-position one would not on a node, so the warehouse refuses it.
 	got, err = client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(5), ToBlock: big.NewInt(6),
-		Topics: [][]common.Hash{{eventset.Transfer}, nil, nil, nil}})
+		Topics: [][]common.Hash{{eventset.Transfer}, {common.HexToHash("0x3")}, nil, nil}})
 	require.NoError(t, err)
-	assert.Len(t, got, 1)
+	assert.Len(t, got, 1, "4-topic logs only; the 3-topic one is excluded as on a node")
+	_, err = client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(5), ToBlock: big.NewInt(6),
+		Topics: [][]common.Hash{{eventset.Transfer}, nil, {owner}}})
+	require.ErrorContains(t, err, "needs a 4-position topics filter")
 
-	// max_results=1: two matches produce the Infura-style error.
-	_, err = client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(5), ToBlock: big.NewInt(6), Topics: [][]common.Hash{{eventset.Transfer}}})
+	// max_results=1: the two 4-topic matches produce the Infura-style error.
+	_, err = client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(5), ToBlock: big.NewInt(6), Topics: [][]common.Hash{{eventset.Transfer}, nil, nil, {common.HexToHash("0x9")}}})
 	require.EqualError(t, err, "query returned more than 1 results")
 
 	// Scope errors reach the client with code -32000.
-	_, err = client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(5), ToBlock: big.NewInt(7), Topics: [][]common.Hash{{eventset.Transfer}}})
+	_, err = client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(5), ToBlock: big.NewInt(7), Topics: [][]common.Hash{{eventset.Transfer}, nil, nil, nil}})
 	var rpcErr rpc.Error
 	require.ErrorAs(t, err, &rpcErr)
 	assert.Equal(t, -32000, rpcErr.ErrorCode())
 	assert.Equal(t, "out of warehouse scope: blocks 5-7 extend above the warehouse head 6", rpcErr.Error())
 
 	// History below the covered interval is refused, not answered with [].
-	_, err = client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(0), ToBlock: big.NewInt(6), Topics: [][]common.Hash{{eventset.Transfer}}})
+	_, err = client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(0), ToBlock: big.NewInt(6), Topics: [][]common.Hash{{eventset.Transfer}, nil, nil, nil}})
 	require.ErrorAs(t, err, &rpcErr)
 	assert.Equal(t, "out of warehouse scope: blocks 0-6 extend below the warehouse coverage start 5", rpcErr.Error())
 
 	// blockHash queries resolve through eth_blocks.
 	h := blocks[1].Hash
-	got, err = client.FilterLogs(ctx, ethereum.FilterQuery{BlockHash: &h, Topics: [][]common.Hash{{eventset.Transfer}}})
+	got, err = client.FilterLogs(ctx, ethereum.FilterQuery{BlockHash: &h, Topics: [][]common.Hash{{eventset.Transfer}, nil, nil, nil}})
 	require.NoError(t, err)
 	assert.Len(t, got, 1)
 	assert.Equal(t, uint64(6), got[0].BlockNumber)

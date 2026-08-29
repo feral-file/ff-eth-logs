@@ -45,8 +45,12 @@ func (f *fakeWarehouse) BlockByHash(_ context.Context, h common.Hash) (logstore.
 	return b, ok, nil
 }
 
+// transfer4 is the exact Transfer filter: four positions, so only 4-topic
+// logs match on a node as well.
+func transfer4() [][]common.Hash { return [][]common.Hash{{eventset.Transfer}, nil, nil, nil} }
+
 func transferCrit(from, to int64) FilterCriteria {
-	return FilterCriteria{FromBlock: big.NewInt(from), ToBlock: big.NewInt(to), Topics: [][]common.Hash{{eventset.Transfer}}}
+	return FilterCriteria{FromBlock: big.NewInt(from), ToBlock: big.NewInt(to), Topics: transfer4()}
 }
 
 func TestGetLogs_ResolvesRangeAndTags(t *testing.T) {
@@ -61,7 +65,7 @@ func TestGetLogs_ResolvesRangeAndTags(t *testing.T) {
 	assert.Equal(t, 50, wh.gotLim)
 
 	// Missing bounds default to latest, which is the warehouse head.
-	_, err = api.GetLogs(ctx, FilterCriteria{Topics: [][]common.Hash{{eventset.Transfer}}})
+	_, err = api.GetLogs(ctx, FilterCriteria{Topics: transfer4()})
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), wh.gotQ.FromBlock)
 	assert.Equal(t, uint64(100), wh.gotQ.ToBlock)
@@ -91,7 +95,7 @@ func TestGetLogs_GethErrorsAndEmpty(t *testing.T) {
 	// from > to after tag resolution (to = earliest) is [] on geth, and the
 	// store must not be touched.
 	wh.gotQ = nil
-	logs, err := api.GetLogs(ctx, FilterCriteria{FromBlock: big.NewInt(50), ToBlock: big.NewInt(rpc.EarliestBlockNumber.Int64()), Topics: [][]common.Hash{{eventset.Transfer}}})
+	logs, err := api.GetLogs(ctx, FilterCriteria{FromBlock: big.NewInt(50), ToBlock: big.NewInt(rpc.EarliestBlockNumber.Int64()), Topics: transfer4()})
 	require.NoError(t, err)
 	assert.NotNil(t, logs)
 	assert.Empty(t, logs)
@@ -117,7 +121,7 @@ func TestGetLogs_ScopeErrors(t *testing.T) {
 	require.ErrorAs(t, err, &scope)
 	assert.Contains(t, err.Error(), "topics[0]")
 
-	_, err = api.GetLogs(ctx, FilterCriteria{FromBlock: big.NewInt(10), ToBlock: big.NewInt(20), Topics: [][]common.Hash{{eventset.Transfer, common.HexToHash("0x1")}}})
+	_, err = api.GetLogs(ctx, FilterCriteria{FromBlock: big.NewInt(10), ToBlock: big.NewInt(20), Topics: [][]common.Hash{{eventset.Transfer, common.HexToHash("0x1")}, nil, nil, nil}})
 	require.ErrorAs(t, err, &scope)
 	assert.Contains(t, err.Error(), "is not a warehouse event signature")
 
@@ -154,7 +158,7 @@ func TestGetLogs_BelowCoverageStart(t *testing.T) {
 	assert.Equal(t, uint64(90), wh.gotQ.FromBlock)
 
 	// A range that is empty after resolution stays [] rather than an error.
-	logs, err := api.GetLogs(ctx, FilterCriteria{FromBlock: big.NewInt(50), ToBlock: big.NewInt(rpc.EarliestBlockNumber.Int64()), Topics: [][]common.Hash{{eventset.Transfer}}})
+	logs, err := api.GetLogs(ctx, FilterCriteria{FromBlock: big.NewInt(50), ToBlock: big.NewInt(rpc.EarliestBlockNumber.Int64()), Topics: transfer4()})
 	require.NoError(t, err)
 	assert.Empty(t, logs)
 }
@@ -166,7 +170,7 @@ func TestGetLogs_CryptoPunksMustPinAddress(t *testing.T) {
 	ctx := context.Background()
 	wh := &fakeWarehouse{head: 100}
 	api := NewAPI(wh, Config{ChainID: 1})
-	punks := [][]common.Hash{{eventset.PunkTransfer, eventset.Transfer}}
+	punks := [][]common.Hash{{eventset.PunkTransfer, eventset.Transfer}, nil, nil, nil}
 	other := common.HexToAddress("0x1")
 
 	var scope *ScopeError
@@ -181,8 +185,42 @@ func TestGetLogs_CryptoPunksMustPinAddress(t *testing.T) {
 	require.NoError(t, err)
 
 	// Standard signatures need no address pin.
-	_, err = api.GetLogs(ctx, FilterCriteria{FromBlock: big.NewInt(1), ToBlock: big.NewInt(2), Topics: [][]common.Hash{{eventset.Transfer}}, Addresses: []common.Address{other}})
+	_, err = api.GetLogs(ctx, FilterCriteria{FromBlock: big.NewInt(1), ToBlock: big.NewInt(2), Topics: transfer4(), Addresses: []common.Address{other}})
 	require.NoError(t, err)
+}
+
+// TestGetLogs_ShapeScope pins that a filter is served only when its position
+// count makes the stored shape the only shape a node could return: the
+// Transfer family needs four positions (wildcards allowed) because a node
+// would also return 3-topic ERC-20 and 1-topic pre-standard Transfers; the
+// metadata/URI signatures cannot be pinned by any filter and are refused;
+// CryptoPunks signatures are stored in every shape and pass with the address.
+func TestGetLogs_ShapeScope(t *testing.T) {
+	ctx := context.Background()
+	api := NewAPI(&fakeWarehouse{head: 100}, Config{ChainID: 1})
+	crit := func(topics [][]common.Hash, addrs ...common.Address) FilterCriteria {
+		return FilterCriteria{FromBlock: big.NewInt(1), ToBlock: big.NewInt(2), Topics: topics, Addresses: addrs}
+	}
+	var scope *ScopeError
+
+	for _, sig := range []common.Hash{eventset.Transfer, eventset.TransferSingle, eventset.TransferBatch} {
+		_, err := api.GetLogs(ctx, crit([][]common.Hash{{sig}}))
+		require.ErrorAs(t, err, &scope, sig.Hex())
+		assert.Contains(t, err.Error(), "needs a 4-position topics filter")
+		_, err = api.GetLogs(ctx, crit([][]common.Hash{{sig}, nil, {common.HexToHash("0xee")}}))
+		require.ErrorAs(t, err, &scope, "3 positions still admit 3-topic logs on a node")
+		_, err = api.GetLogs(ctx, crit([][]common.Hash{{sig}, nil, nil, nil}))
+		require.NoError(t, err, sig.Hex())
+	}
+	for _, sig := range []common.Hash{eventset.MetadataUpdate, eventset.BatchMetadataUpdate, eventset.URI} {
+		_, err := api.GetLogs(ctx, crit([][]common.Hash{{sig}}))
+		require.ErrorAs(t, err, &scope, sig.Hex())
+		assert.Contains(t, err.Error(), "stored only in its standard shape")
+		_, err = api.GetLogs(ctx, crit([][]common.Hash{{eventset.Transfer, sig}, nil, nil, nil}))
+		require.ErrorAs(t, err, &scope, "mixed with Transfer it is still refused")
+	}
+	_, err := api.GetLogs(ctx, crit([][]common.Hash{{eventset.PunkTransfer}}, eventset.CryptoPunksAddress))
+	require.NoError(t, err, "every CryptoPunks shape is stored, so one position is exact")
 }
 
 func TestGetLogs_BlockHash(t *testing.T) {
@@ -191,13 +229,13 @@ func TestGetLogs_BlockHash(t *testing.T) {
 	wh := &fakeWarehouse{head: 100, blocks: map[common.Hash]logstore.Block{h: {Number: 42, Hash: h}}}
 	api := NewAPI(wh, Config{ChainID: 1})
 
-	_, err := api.GetLogs(ctx, FilterCriteria{BlockHash: &h, Topics: [][]common.Hash{{eventset.Transfer}}})
+	_, err := api.GetLogs(ctx, FilterCriteria{BlockHash: &h, Topics: transfer4()})
 	require.NoError(t, err)
 	assert.Equal(t, uint64(42), wh.gotQ.FromBlock)
 	assert.Equal(t, uint64(42), wh.gotQ.ToBlock)
 
 	unknown := common.HexToHash("0xbb")
-	_, err = api.GetLogs(ctx, FilterCriteria{BlockHash: &unknown, Topics: [][]common.Hash{{eventset.Transfer}}})
+	_, err = api.GetLogs(ctx, FilterCriteria{BlockHash: &unknown, Topics: transfer4()})
 	assert.EqualError(t, err, "unknown block")
 }
 
