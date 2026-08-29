@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/feral-file/ff-eth-logs/internal/logger"
+	"github.com/feral-file/ff-eth-logs/internal/logstore"
 )
 
 // ServerConfig is the HTTP listener configuration.
@@ -82,7 +83,13 @@ func (s *Server) Run(ctx context.Context) error {
 // answers; lag is for dashboards, not for the healthcheck, because a long
 // catch-up is a healthy state.
 func (a *API) health(w http.ResponseWriter, r *http.Request) {
-	cov, ok, err := a.store.Coverage(r.Context())
+	var cov logstore.Coverage
+	var ok bool
+	err := a.store.Read(r.Context(), func(v logstore.View) error {
+		var err error
+		cov, ok, err = v.Coverage(r.Context())
+		return err
+	})
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
 		w.WriteHeader(http.StatusServiceUnavailable)

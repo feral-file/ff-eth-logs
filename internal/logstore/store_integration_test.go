@@ -246,3 +246,41 @@ func blocksFor(from, to uint64) []Block {
 	}
 	return out
 }
+
+// TestReadSnapshotSurvivesConcurrentRewind pins the API's atomicity
+// guarantee: a Read that has already checked coverage keeps seeing the same
+// logs even when a rewind commits from another connection mid-request, so a
+// request never turns into a silently partial answer; the next Read sees the
+// rewound coverage and refuses the range.
+func TestReadSnapshotSurvivesConcurrentRewind(t *testing.T) {
+	ctx := context.Background()
+	s := NewFromPool(testdb.Open(t))
+	logs := []types.Log{
+		{BlockNumber: 10, Address: common.HexToAddress("0x1"), Topics: []common.Hash{common.HexToHash("0xa")}, Data: []byte{}},
+		{BlockNumber: 12, Address: common.HexToAddress("0x1"), Topics: []common.Hash{common.HexToHash("0xa")}, Data: []byte{}},
+	}
+	require.NoError(t, s.WriteRange(ctx, 10, 12, blocksFor(10, 12), logs))
+
+	err := s.Read(ctx, func(v View) error {
+		cov, ok, err := v.Coverage(ctx)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.Equal(t, Coverage{Start: 10, Head: 12}, cov)
+
+		// A deep-reorg recovery rewinds between the coverage check and the read.
+		require.NoError(t, s.Rewind(ctx, 10))
+
+		got, err := v.FilterLogs(ctx, Query{FromBlock: 10, ToBlock: 12}, 0)
+		require.NoError(t, err)
+		assert.Len(t, got, 2, "the snapshot still holds both logs the coverage authorized")
+		return nil
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, s.Read(ctx, func(v View) error {
+		cov, _, err := v.Coverage(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, Coverage{Start: 10, Head: 10}, cov, "a later read sees the rewound coverage")
+		return nil
+	}))
+}

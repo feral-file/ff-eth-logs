@@ -126,6 +126,9 @@ func (s *Subscriber) Run(ctx context.Context, fromBlock uint64) error {
 	}()
 
 	state := streamState{next: fromBlock, lowerBound: fromBlock, heads: map[uint64]*chain.BlockHead{}}
+	if err := s.verifyResumePoint(ctx, &state); err != nil {
+		return err
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -146,6 +149,45 @@ func (s *Subscriber) Run(ctx context.Context, fromBlock uint64) error {
 			state.advance(to)
 		}
 	}
+}
+
+// verifyResumePoint checks the block the stream resumes after (next-1)
+// against the canonical chain before the first head is processed. Reason: a
+// reorg that replaced written blocks while the process was down leaves no
+// retained head to disagree with, so reconcile alone would append canonical
+// blocks on top of orphaned ones. Comparing the persisted hash with
+// eth_getBlockByNumber closes that gap; a mismatch runs the same
+// verified-ancestor rewind as a live deep reorg. When the hash matches (or
+// nothing is stored there — a fresh start_block), the canonical head is
+// retained so reconciliation has its bridge from the first head on.
+func (s *Subscriber) verifyResumePoint(ctx context.Context, st *streamState) error {
+	if st.next == 0 {
+		return nil
+	}
+	last := st.next - 1
+	stored, ok, err := s.sink.StoredBlockHash(ctx, last)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	canonical, err := s.client.HeadByNumber(ctx, last)
+	if err != nil {
+		return fmt.Errorf("verify resume point %d: %w", last, err)
+	}
+	if canonical.Hash == stored {
+		st.heads[last] = canonical
+		st.tip = last
+		return nil
+	}
+	logger.WarnCtx(ctx, "Written head is no longer canonical at start; a reorg happened while the process was down",
+		zap.Uint64("height", last), zap.String("stored", stored.Hex()), zap.String("canonical", canonical.Hash.Hex()))
+	if err := s.recoverDeepReorg(ctx, st, last); err != nil {
+		return err
+	}
+	st.lowerBound = min(st.lowerBound, st.next)
+	return nil
 }
 
 // drainHeads returns every head already queued behind the one just read.
@@ -289,8 +331,8 @@ func (st *streamState) truncateAbove(height uint64) {
 // It returns stale=true when the node says the retained or canonical chain
 // disagrees with the new head's ancestry — the new head must not be retained
 // — and replaced=true when any retained head was swapped for the canonical
-// one. Not covered: a deep reorg that spans a process restart — the retained
-// heads live in memory and the cursor stores no hash.
+// one. A deep reorg that spans a process restart is caught by
+// verifyResumePoint before the first head, against the persisted hashes.
 func (s *Subscriber) reconcile(ctx context.Context, st *streamState, h *chain.BlockHead) (stale, replaced bool, err error) {
 	n := uint64(h.Number)
 	if n == 0 {

@@ -48,13 +48,15 @@ func TestRun_DeepReorgRewindsToVerifiedAncestor(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	canonical99 := c.canonical(99)
+	c.last = canonical99 // 100 descends from the backfilled 99
 	f := newFixture(t, c.next(100))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	f.sink.seedStored(c, 90, 99) // backfilled history below the start block
-	canonical99 := c.canonical(99)
-	fork100 := c.fork(100) // descends from the canonical 99
+	fork100 := c.fork(100)       // also descends from the canonical 99
 	inOrder(
+		f.expectHead(99, canonical99), // resume point verified at start: 99 is canonical
 		f.expectLogs(100, 100),
 		// fork100 arrives for the written height 100: the node confirms it is canonical...
 		f.expectHead(100, fork100),
@@ -323,17 +325,19 @@ func TestRun_TipOnlyDeepReorgRewindsToForkPoint(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	canonical99 := c.canonical(99)
+	c.last = canonical99 // 100 descends from the backfilled 99
 	f := newFixture(t, c.next(100), c.next(101), c.next(102))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	f.sink.seedStored(c, 90, 99)
-	canonical99 := c.canonical(99)
 
 	b100 := head(100, common.HexToHash("0xb100"), canonical99.Hash)
 	b101 := head(101, common.HexToHash("0xb101"), b100.Hash)
 	b102 := head(102, common.HexToHash("0xb102"), b101.Hash)
 	b103 := c.orphanTip(103, b102.Hash)
 	inOrder(
+		f.expectHead(99, canonical99), // resume point verified at start
 		f.expectLogs(100, 100),
 		// reconcile walks down to the written 100 and finds it replaced
 		f.expectHead(102, b102),
@@ -463,4 +467,64 @@ func TestRun_MetadataFetchErrorFails(t *testing.T) {
 	require.ErrorIs(t, err, headErr)
 	require.Contains(t, err.Error(), "fetch block 101 metadata")
 	require.Empty(t, f.sink.calls)
+}
+
+// TestRun_RestartSpanningDeepReorgRewinds pins the case no in-memory head can
+// catch: the process resumes at cursor+1 (101) after a reorg replaced the
+// written 100 while it was down. The persisted hash of 100 disagrees with the
+// canonical header at start, the verified ancestor is 99, the store is
+// rewound to it, and 100..101 are written from the canonical chain.
+func TestRun_RestartSpanningDeepReorgRewinds(t *testing.T) {
+	t.Parallel()
+
+	c := &headChain{}
+	canonical99 := c.canonical(99)
+	canonical100 := c.canonical(100)
+	tip101 := c.orphanTip(101, canonical100.Hash)
+	f := newFixture(t, tip101)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.sink.seedStored(c, 90, 99)
+	f.sink.stored[100] = common.HexToHash("0x01d100") // what was written before the restart: now orphaned
+
+	inOrder(
+		f.expectHead(100, canonical100), // resume check: persisted 100 != canonical
+		f.expectHead(99, canonical99),   // verified ancestor
+		// tip 101 bridges 100 against the fresh window {99}
+		f.expectHead(100, canonical100),
+		f.expectLogs(100, 101),
+	)
+	f.sink.steps = []func(uint64, uint64) error{thenCancel(cancel)}
+
+	err := f.run(ctx, ingestion.Config{}, 101)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, []uint64{99}, f.sink.rewinds)
+	require.Equal(t, [][2]uint64{{100, 101}}, f.sink.ranges())
+	require.Equal(t, canonical100.Hash, f.sink.calls[0].Blocks[0].Hash)
+}
+
+// TestRun_ResumePointStillCanonicalSeedsBridge pins the happy restart: the
+// persisted cursor block matches the chain, nothing is rewound, and the
+// retained canonical head lets the first tip reconcile through it.
+func TestRun_ResumePointStillCanonicalSeedsBridge(t *testing.T) {
+	t.Parallel()
+
+	c := &headChain{}
+	canonical100 := c.canonical(100)
+	tip101 := c.orphanTip(101, canonical100.Hash)
+	f := newFixture(t, tip101)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.sink.seedStored(c, 90, 100)
+
+	inOrder(
+		f.expectHead(100, canonical100), // resume check: match, retained as the bridge
+		f.expectLogs(101, 101),
+	)
+	f.sink.steps = []func(uint64, uint64) error{thenCancel(cancel)}
+
+	err := f.run(ctx, ingestion.Config{}, 101)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Empty(t, f.sink.rewinds)
+	require.Equal(t, [][2]uint64{{101, 101}}, f.sink.ranges())
 }

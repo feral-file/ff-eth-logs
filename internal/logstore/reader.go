@@ -28,19 +28,81 @@ type Query struct {
 // ErrTooManyResults is returned when a query would exceed the caller's limit.
 var ErrTooManyResults = errors.New("too many results")
 
+// View is one consistent read of the warehouse: coverage, block lookup and
+// log selection all see the same snapshot.
+//
+// Reason: a deep-reorg recovery rewinds the store while the API is serving.
+// Reading the coverage from one connection and the logs from another lets a
+// rewind commit in between, so a range the old coverage authorized could
+// come back empty or partial from the new data — a silent omission, the one
+// failure the API exists to prevent. Store.Read runs the whole request in a
+// REPEATABLE READ transaction, so it either sees the pre-rewind data
+// entirely (coherent, and superseded a moment later like any read) or the
+// post-rewind coverage that refuses the range.
+type View interface {
+	Coverage(ctx context.Context) (Coverage, bool, error)
+	FilterLogs(ctx context.Context, q Query, limit int) ([]types.Log, error)
+	BlockByHash(ctx context.Context, hash common.Hash) (Block, bool, error)
+}
+
+// Read runs fn against a single read-only REPEATABLE READ snapshot.
+func (s *Store) Read(ctx context.Context, fn func(View) error) error {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return fmt.Errorf("begin read snapshot: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := fn(snapshot{q: tx}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// rowQuerier is the subset of pgx.Tx / pgxpool.Pool the reads need.
+type rowQuerier interface {
+	querier
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+// snapshot is a View bound to one transaction.
+type snapshot struct{ q rowQuerier }
+
+func (v snapshot) Coverage(ctx context.Context) (Coverage, bool, error) {
+	return readCoverage(ctx, v.q, false)
+}
+
+func (v snapshot) FilterLogs(ctx context.Context, q Query, limit int) ([]types.Log, error) {
+	return filterLogs(ctx, v.q, q, limit)
+}
+
+func (v snapshot) BlockByHash(ctx context.Context, hash common.Hash) (Block, bool, error) {
+	return blockByHash(ctx, v.q, hash)
+}
+
+// FilterLogs is the pool-backed (non-snapshot) read; the API goes through
+// Read instead so its coverage check and selection share one snapshot.
+func (s *Store) FilterLogs(ctx context.Context, q Query, limit int) ([]types.Log, error) {
+	return filterLogs(ctx, s.pool, q, limit)
+}
+
+// BlockByHash resolves a blockHash filter to its stored block.
+func (s *Store) BlockByHash(ctx context.Context, hash common.Hash) (Block, bool, error) {
+	return blockByHash(ctx, s.pool, hash)
+}
+
 // selectLogs is the column list every log read uses; scanLog must match it.
 const selectLogs = `SELECT l.block_number, l.log_index, l.tx_index, l.tx_hash, l.address,
 	l.topic0, l.topic1, l.topic2, l.topic3, l.data, b.hash, b.ts
 	FROM eth_logs l JOIN eth_blocks b ON b.number = l.block_number`
 
-// FilterLogs returns the logs matching q in chain order (block, log index).
+// filterLogs returns the logs matching q in chain order (block, log index).
 // limit > 0 caps the result: exceeding it returns ErrTooManyResults rather
 // than a truncated slice, because a silently partial eth_getLogs answer is
 // the one thing a client cannot detect. removed is always false: only
 // confirmed blocks are stored.
-func (s *Store) FilterLogs(ctx context.Context, q Query, limit int) ([]types.Log, error) {
+func filterLogs(ctx context.Context, db rowQuerier, q Query, limit int) ([]types.Log, error) {
 	sql, args := buildFilter(q, limit)
-	rows, err := s.pool.Query(ctx, sql, args...)
+	rows, err := db.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query logs: %w", err)
 	}
@@ -151,13 +213,12 @@ func (s *Store) StoredBlockHash(ctx context.Context, n uint64) (common.Hash, boo
 	return common.BytesToHash(h), true, nil
 }
 
-// BlockByHash resolves a blockHash filter to its stored block.
-func (s *Store) BlockByHash(ctx context.Context, hash common.Hash) (Block, bool, error) {
+func blockByHash(ctx context.Context, db querier, hash common.Hash) (Block, bool, error) {
 	var (
 		n, ts int64
 		h     []byte
 	)
-	err := s.pool.QueryRow(ctx, `SELECT number, hash, ts FROM eth_blocks WHERE hash = $1`, hash.Bytes()).Scan(&n, &h, &ts)
+	err := db.QueryRow(ctx, `SELECT number, hash, ts FROM eth_blocks WHERE hash = $1`, hash.Bytes()).Scan(&n, &h, &ts)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Block{}, false, nil
 	}

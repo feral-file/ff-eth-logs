@@ -29,6 +29,8 @@ type fakeWarehouse struct {
 	gotLim  int
 }
 
+func (f *fakeWarehouse) Read(_ context.Context, fn func(logstore.View) error) error { return fn(f) }
+
 func (f *fakeWarehouse) Coverage(context.Context) (logstore.Coverage, bool, error) {
 	return logstore.Coverage{Start: f.start, Head: f.head}, !f.empty, f.headErr
 }

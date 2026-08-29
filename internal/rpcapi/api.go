@@ -16,11 +16,12 @@ import (
 	"github.com/feral-file/ff-eth-logs/internal/logstore"
 )
 
-// Warehouse is what the API reads: the covered interval and the two lookups.
+// Warehouse is what the API reads. Every request runs inside one Read so
+// the coverage check, the blockHash lookup and the log selection see the
+// same snapshot — a rewind committing mid-request cannot turn an authorized
+// range into a silently partial answer (see logstore.View).
 type Warehouse interface {
-	Coverage(ctx context.Context) (logstore.Coverage, bool, error)
-	FilterLogs(ctx context.Context, q logstore.Query, limit int) ([]types.Log, error)
-	BlockByHash(ctx context.Context, hash common.Hash) (logstore.Block, bool, error)
+	Read(ctx context.Context, fn func(logstore.View) error) error
 }
 
 // Config tunes the API.
@@ -70,14 +71,28 @@ func (a *API) ChainId() *hexutil.Big { //nolint:revive // geth method naming map
 // block whose logs are fully stored — not the chain tip. A client that needs
 // the tip must ask the chain; this is the split point for a routing client.
 func (a *API) BlockNumber(ctx context.Context) (hexutil.Uint64, error) {
-	cov, ok, err := a.store.Coverage(ctx)
+	cov, err := a.coverage(ctx)
 	if err != nil {
 		return 0, err
 	}
-	if !ok {
-		return 0, &ScopeError{Reason: "warehouse is empty"}
-	}
 	return hexutil.Uint64(cov.Head), nil
+}
+
+// coverage reads the covered interval, refusing an empty warehouse.
+func (a *API) coverage(ctx context.Context) (logstore.Coverage, error) {
+	var cov logstore.Coverage
+	err := a.store.Read(ctx, func(v logstore.View) error {
+		c, ok, err := v.Coverage(ctx)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return &ScopeError{Reason: "warehouse is empty"}
+		}
+		cov = c
+		return nil
+	})
+	return cov, err
 }
 
 // GetLogs implements eth_getLogs with go-ethereum's semantics on the stored
@@ -89,32 +104,39 @@ func (a *API) GetLogs(ctx context.Context, crit FilterCriteria) ([]*types.Log, e
 	if err := checkTopicScope(crit.Topics, crit.Addresses); err != nil {
 		return nil, err
 	}
-	cov, ok, err := a.store.Coverage(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, &ScopeError{Reason: "warehouse is empty"}
-	}
-	q, empty, err := a.resolveRange(ctx, crit, cov)
-	if err != nil || empty {
-		return []*types.Log{}, err
-	}
 	if a.cfg.QueryTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, a.cfg.QueryTimeout)
 		defer cancel()
 	}
-	logs, err := a.store.FilterLogs(ctx, q, a.cfg.MaxResults)
-	if errors.Is(err, logstore.ErrTooManyResults) {
-		return nil, fmt.Errorf("query returned more than %d results", a.cfg.MaxResults)
-	}
+	out := []*types.Log{}
+	err := a.store.Read(ctx, func(v logstore.View) error {
+		cov, ok, err := v.Coverage(ctx)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return &ScopeError{Reason: "warehouse is empty"}
+		}
+		q, empty, err := resolveRange(ctx, v, crit, cov)
+		if err != nil || empty {
+			return err
+		}
+		logs, err := v.FilterLogs(ctx, q, a.cfg.MaxResults)
+		if errors.Is(err, logstore.ErrTooManyResults) {
+			return fmt.Errorf("query returned more than %d results", a.cfg.MaxResults)
+		}
+		if err != nil {
+			return err
+		}
+		out = make([]*types.Log, len(logs))
+		for i := range logs {
+			out[i] = &logs[i]
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	out := make([]*types.Log, len(logs))
-	for i := range logs {
-		out[i] = &logs[i]
 	}
 	return out, nil
 }
@@ -160,10 +182,10 @@ func onlyCryptoPunks(addresses []common.Address) bool {
 // geth's GetLogs/Filter.Logs order of checks, then bounds it by the covered
 // interval. empty=true reproduces geth returning [] for begin > end after
 // resolution.
-func (a *API) resolveRange(ctx context.Context, crit FilterCriteria, cov logstore.Coverage) (logstore.Query, bool, error) {
+func resolveRange(ctx context.Context, v logstore.View, crit FilterCriteria, cov logstore.Coverage) (logstore.Query, bool, error) {
 	q := logstore.Query{Addresses: crit.Addresses, Topics: crit.Topics}
 	if crit.BlockHash != nil {
-		block, ok, err := a.store.BlockByHash(ctx, *crit.BlockHash)
+		block, ok, err := v.BlockByHash(ctx, *crit.BlockHash)
 		if err != nil {
 			return q, false, err
 		}

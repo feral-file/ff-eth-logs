@@ -84,7 +84,7 @@ These mean the fork is deeper than any mainnet reorg should be, or reaches below
 
 **Manual rewind** — `ff-eth-logs rewind -to N` is also the tool for re-ingesting a range that is suspected stale for any other reason (a provider incident, a deliberate re-check). Stop the service, rewind, start; it resumes at `N+1`.
 
-A deep reorg that spans a process restart is detected the same way on the next head that disagrees with a persisted hash, because the comparison is against `eth_blocks`, not against in-memory heads.
+A deep reorg that spans a process restart is detected at start: before the first head, ingestion compares the persisted hash of the cursor block with the canonical header and runs the same recovery on a mismatch (`Written head is no longer canonical at start; a reorg happened while the process was down` at warn, then the error line above).
 
 ## 3. Catch-up too large
 
