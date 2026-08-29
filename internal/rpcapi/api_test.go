@@ -237,6 +237,18 @@ func TestGetLogs_BlockHash(t *testing.T) {
 	unknown := common.HexToHash("0xbb")
 	_, err = api.GetLogs(ctx, FilterCriteria{BlockHash: &unknown, Topics: transfer4()})
 	assert.EqualError(t, err, "unknown block")
+
+	// A stored block outside the published interval (rows left by an
+	// interrupted backfill, or above a rewound head) is refused, not served.
+	wh.start, wh.gotQ = 50, nil
+	_, err = api.GetLogs(ctx, FilterCriteria{BlockHash: &h, Topics: transfer4()})
+	var scope *ScopeError
+	require.ErrorAs(t, err, &scope)
+	assert.Equal(t, "out of warehouse scope: block 42 (0x00000000000000000000000000000000000000000000000000000000000000aa) is outside the warehouse coverage 50-100", err.Error())
+	assert.Nil(t, wh.gotQ)
+	wh.start, wh.head = 0, 41
+	_, err = api.GetLogs(ctx, FilterCriteria{BlockHash: &h, Topics: transfer4()})
+	require.ErrorAs(t, err, &scope)
 }
 
 func TestGetLogs_TooManyResultsMimicsInfura(t *testing.T) {

@@ -17,6 +17,11 @@ import (
 // EnvPrefix is the environment variable prefix for every key.
 const EnvPrefix = "FF_ETH_LOGS"
 
+// MainnetChainID is the only chain the warehouse accepts. The schema has no
+// chain column and the backfill export is mainnet, so a warehouse can never
+// hold anything else without being served as mainnet later.
+const MainnetChainID = 1
+
 // Config is the whole service configuration.
 type Config struct {
 	Debug     bool   `mapstructure:"debug"`
@@ -59,7 +64,9 @@ func (d DatabaseConfig) DSN() string {
 type EthereumConfig struct {
 	// WebSocketURL is the newHeads + eth_getLogs endpoint (one connection).
 	WebSocketURL string `mapstructure:"websocket_url"`
-	ChainID      uint64 `mapstructure:"chain_id"`
+	// ChainID must be MainnetChainID; it is configurable only so the provider
+	// check (eth_chainId) has an explicit expectation to compare against.
+	ChainID uint64 `mapstructure:"chain_id"`
 	// IngestionEnabled lets an API-only replica run without following the chain.
 	IngestionEnabled bool `mapstructure:"ingestion_enabled"`
 	// StartBlock, when non-zero, is where an empty warehouse starts; refused
@@ -179,8 +186,8 @@ func Validate(cfg *Config) error {
 		return fmt.Errorf("ethereum.confirmation_blocks (%d) must be below ethereum.max_catchup_blocks (%d)",
 			cfg.Ethereum.ConfirmationBlocks, cfg.Ethereum.MaxCatchupBlocks)
 	}
-	if cfg.Ethereum.ChainID == 0 {
-		return errors.New("ethereum.chain_id must be > 0")
+	if cfg.Ethereum.ChainID != MainnetChainID {
+		return fmt.Errorf("ethereum.chain_id must be %d: the warehouse is mainnet-only (the schema carries no chain identity, so another chain's data could later be served as mainnet)", MainnetChainID)
 	}
 	if cfg.RPC.MaxResults < 0 {
 		return errors.New("rpc.max_results must be >= 0")

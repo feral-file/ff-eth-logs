@@ -40,7 +40,8 @@ Resolution follows geth's `GetLogs` / `Filter.Logs` order of checks, then bounds
 
 | Case | Result |
 | --- | --- |
-| `blockHash` known | that block only |
+| `blockHash` known and inside `[coverage_start, head]` | that block only |
+| `blockHash` known but outside the covered interval (rows left by an interrupted backfill, or above a rewound head) | `-32000 out of warehouse scope: block N (0x…) is outside the warehouse coverage S-H` |
 | `blockHash` unknown | `-32000 unknown block` |
 | `fromBlock` / `toBlock` omitted | `latest` |
 | `latest`, `safe`, `finalized` | the warehouse head (every stored block is at least `confirmation_blocks` deep, which is shallower than a node's `safe` / `finalized`) |

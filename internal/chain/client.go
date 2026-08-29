@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net"
 	neturl "net/url"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -89,7 +90,7 @@ type BlockHead struct {
 func Dial(ctx context.Context, rawurl string) (EthClient, error) {
 	client, err := ethclient.DialContext(ctx, rawurl)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("dial %s: %w", endpointForLogs(rawurl), RedactURLs(err))
 	}
 	return NewRealEthClient(client, rawurl), nil
 }
@@ -115,6 +116,40 @@ func endpointForLogs(rawurl string) string {
 	}
 	return parsed.Scheme + "://" + parsed.Host
 }
+
+// urlPattern matches ws/wss/http/https URLs inside free text, so a provider
+// URL embedded in a transport error can be reduced to scheme and host.
+var urlPattern = regexp.MustCompile(`(?i)\b(wss?|https?)://[^\s"'<>]+`)
+
+// RedactURLs replaces every URL in err's message with its scheme and host.
+//
+// Reason: provider URLs carry the API key in the path (Infura, Chainstack),
+// and transport errors from net/http and the websocket dialer quote the full
+// URL. Those errors are logged (zap.Error), returned up to the fatal exit
+// log, and forwarded to Sentry, so every error that can carry the endpoint
+// is passed through here before it leaves this package. The wrapped error
+// keeps its chain (errors.Is/As still work through redactedError).
+func RedactURLs(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	clean := urlPattern.ReplaceAllStringFunc(msg, endpointForLogs)
+	if clean == msg {
+		return err
+	}
+	return &redactedError{msg: clean, cause: err}
+}
+
+// redactedError carries a sanitized message while preserving the cause for
+// errors.Is / errors.As (the retry classifier looks through it).
+type redactedError struct {
+	msg   string
+	cause error
+}
+
+func (e *redactedError) Error() string { return e.msg }
+func (e *redactedError) Unwrap() error { return e.cause }
 
 // retryableMessages are matched against the LOWERCASED error text, so every
 // entry must be lowercase: as uppercase literals they could never match, which
@@ -178,7 +213,7 @@ func (c *RealEthClient) executeWithRetry(ctx context.Context, operation func() e
 	b.RandomizationFactor = 0.5
 
 	retryOperation := func() error {
-		err := operation()
+		err := RedactURLs(operation())
 		if err == nil {
 			return nil
 		}

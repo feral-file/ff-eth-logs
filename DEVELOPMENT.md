@@ -62,7 +62,7 @@ The binary supports **dual configuration**: a YAML file and `FF_ETH_LOGS_*` envi
 | `database.sslmode` | `disable` | |
 | `database.max_conns` | `16` | pgx pool size |
 | `ethereum.websocket_url` | — | **Required when `ingestion_enabled`**; `newHeads` + `eth_getLogs` on one connection |
-| `ethereum.chain_id` | `1` | What `eth_chainId` and `/health` report |
+| `ethereum.chain_id` | `1` | Must be `1`: the warehouse is mainnet-only (no chain column in the schema); the provider must report it via `eth_chainId` |
 | `ethereum.ingestion_enabled` | `true` | `false` serves the stored head only (API-only replica) |
 | `ethereum.start_block` | `0` | Where an empty warehouse starts; refused once a cursor exists (use `rewind` and unset it) |
 | `ethereum.confirmation_blocks` | `2` | Blocks are written this far behind the tip; must be below `max_catchup_blocks` |

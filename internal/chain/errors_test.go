@@ -119,3 +119,18 @@ func TestSingleBlockOverflowError(t *testing.T) {
 	require.Equal(t, "too many results in single block 42: query returned more than 10000 results", err.Error())
 	require.True(t, chain.IsTooManyResultsError(err), "the overflow keeps its cause's classification")
 }
+
+// TestRedactURLs pins that a provider URL inside an error message loses its
+// path (where the API key lives) while the error chain stays intact.
+func TestRedactURLs(t *testing.T) {
+	t.Parallel()
+	require.Nil(t, chain.RedactURLs(nil))
+
+	raw := errors.New(`dial tcp: lookup failed for wss://ethereum-mainnet.core.chainstack.com/abc123secret and https://mainnet.infura.io/v3/KEY?x=1`)
+	got := chain.RedactURLs(raw)
+	require.Equal(t, "dial tcp: lookup failed for wss://ethereum-mainnet.core.chainstack.com and https://mainnet.infura.io", got.Error())
+	require.ErrorIs(t, got, raw)
+
+	plain := errors.New("connection reset")
+	require.Same(t, plain, chain.RedactURLs(plain), "errors without a URL pass through unchanged")
+}

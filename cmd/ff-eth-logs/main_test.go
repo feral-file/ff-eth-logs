@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRunDispatch(t *testing.T) {
@@ -27,6 +28,15 @@ func TestRewindRequiresTarget(t *testing.T) {
 	t.Setenv("FF_ETH_LOGS_ETHEREUM_INGESTION_ENABLED", "false")
 	err := runRewind([]string{"-env", t.TempDir()})
 	assert.EqualError(t, err, "rewind: -to is required")
+	// An explicit -to 0 is a target (keep genesis), so it gets past the flag
+	// check and fails only on the unreachable database.
+	t.Setenv("FF_ETH_LOGS_DATABASE_PORT", "1")
+	err = runRewind([]string{"-env", t.TempDir(), "-to", "0"})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "-to is required")
+	assert.Contains(t, err.Error(), "warehouse database")
+	err = runRewind([]string{"-env", t.TempDir(), "-to", "x"})
+	assert.ErrorContains(t, err, "-to must be a block number")
 	err = runBackfill([]string{"-env", t.TempDir()})
 	assert.EqualError(t, err, "backfill: -dir is required")
 }

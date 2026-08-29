@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -140,14 +141,24 @@ func runIngestion(ctx context.Context, cfg *config.Config, store *logstore.Store
 // lag: drop everything above -to and let the next start re-fetch it.
 func runRewind(args []string) error {
 	var to uint64
+	toSet := false
 	cfg, ctx, stop, err := commonFlags("rewind", args, func(fs *flag.FlagSet) {
-		fs.Uint64Var(&to, "to", 0, "Last block to keep; everything above is deleted and re-ingested on the next start")
+		// Presence is tracked separately from the value: block 0 is a valid
+		// target on a full-history warehouse (keep genesis, re-ingest from 1).
+		fs.Func("to", "Last block to keep; everything above is deleted and re-ingested on the next start", func(v string) error {
+			n, err := strconv.ParseUint(v, 10, 64)
+			if err != nil {
+				return fmt.Errorf("-to must be a block number: %w", err)
+			}
+			to, toSet = n, true
+			return nil
+		})
 	})
 	if err != nil {
 		return err
 	}
 	defer stop()
-	if to == 0 {
+	if !toSet {
 		return errors.New("rewind: -to is required")
 	}
 	store, err := logstore.Open(ctx, cfg.Database.DSN())

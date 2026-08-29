@@ -301,3 +301,23 @@ func TestWriteRangeRefusesLogsFromAnotherBlock(t *testing.T) {
 	l.BlockHash = blockAt(10).Hash
 	require.NoError(t, s.WriteRange(ctx, 10, 10, []Block{blockAt(10)}, []types.Log{l}))
 }
+
+// TestRewindToGenesisBoundary pins that block 0 is a valid rewind target on
+// a full-history warehouse: genesis stays, everything above is dropped, and
+// the next start resumes at block 1.
+func TestRewindToGenesisBoundary(t *testing.T) {
+	ctx := context.Background()
+	s := NewFromPool(testdb.Open(t))
+	require.NoError(t, s.WriteRange(ctx, 0, 2, blocksFor(0, 2), nil))
+	require.NoError(t, s.Rewind(ctx, 0))
+	cov, ok, err := s.Coverage(ctx)
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, Coverage{Start: 0, Head: 0}, cov)
+	_, found, err := s.BlockByHash(ctx, blockAt(0).Hash)
+	require.NoError(t, err)
+	assert.True(t, found, "genesis is kept")
+	_, found, err = s.BlockByHash(ctx, blockAt(1).Hash)
+	require.NoError(t, err)
+	assert.False(t, found)
+}

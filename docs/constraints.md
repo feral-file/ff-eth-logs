@@ -33,6 +33,7 @@ Hard and soft constraints for **FF Eth Logs**. Treat these as guardrails when ch
 
 ## 4. Operational constraints
 
+- **Mainnet only, enforced** — `ethereum.chain_id` must be `1` (`config.Validate`: the schema carries no chain identity, so another chain's data could later be served as mainnet), and ingestion calls `eth_chainId` before reading the cursor and refuses to start unless the provider reports it (`provider chain id X does not match configured ethereum.chain_id Y`).
 - **Single process** — `serve` runs the API and tail ingestion together; either failing stops the other (an API alone would serve a head that silently stops moving). An API-only replica is possible with `ethereum.ingestion_enabled=false` but shares the same database.
 - **Ingestion failures are fatal** — subscription errors, fetch failures after the retry budget (5 s → 30 s backoff, 5 min total), sink failures and a too-large catch-up all end the process. There is no in-process reconnect; the supervisor restarts it and it resumes from the cursor.
 - **`ethereum.max_catchup_blocks`** (default 50,000 ≈ 7 days) bounds the cursor-to-tip gap on start, measured to the tip including the confirmation window. A larger gap is `ingestion catch-up exceeds max_catchup_blocks`, a startup failure; raise the knob deliberately. `confirmation_blocks` must be below it.
@@ -45,7 +46,7 @@ Hard and soft constraints for **FF Eth Logs**. Treat these as guardrails when ch
 ## 5. Security constraints
 
 - **No authentication** — the endpoint has no auth, no TLS, no rate limiting. It must bind on the private backend network only; `server.host` defaults to `0.0.0.0` inside the container and the deployment must not publish the port beyond that network.
-- **RPC URL carries the key** — `ethereum.websocket_url` includes the provider API key in the path. `chain.endpointForLogs` reduces it to scheme and host before it reaches any log line; do not log the URL elsewhere.
+- **RPC URL carries the key** — `ethereum.websocket_url` includes the provider API key in the path. `chain.endpointForLogs` reduces it to scheme and host in log fields, and `chain.RedactURLs` strips the path from every URL inside an error value before it is logged, returned or forwarded to Sentry (transport errors quote the full URL); do not log the URL elsewhere.
 - **Query parameters travel as bind parameters** — `logstore.buildFilter` assembles SQL from fixed fragments; addresses and topics are `bytea[]` parameters, never interpolated.
 - **Sentry** receives error-level events only (deep reorgs, fatal exits) with info lines as breadcrumbs; log lines carry block numbers and hashes, not request bodies.
 

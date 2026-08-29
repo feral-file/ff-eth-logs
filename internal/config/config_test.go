@@ -50,9 +50,11 @@ func TestValidate(t *testing.T) {
 	c.Ethereum.ConfirmationBlocks = 100
 	assert.ErrorContains(t, Validate(c), "must be below")
 
-	c = base()
-	c.Ethereum.ChainID = 0
-	assert.ErrorContains(t, Validate(c), "chain_id")
+	for _, id := range []uint64{0, 11155111, 137} {
+		c = base()
+		c.Ethereum.ChainID = id
+		assert.ErrorContains(t, Validate(c), "ethereum.chain_id must be 1", "chain %d", id)
+	}
 
 	c = base()
 	c.RPC.MaxResults = -1

@@ -213,6 +213,12 @@ func resolveRange(ctx context.Context, v logstore.View, crit FilterCriteria, cov
 		if !ok {
 			return q, false, errUnknownBlock
 		}
+		// A stored row is not proof of coverage: an interrupted backfill leaves
+		// historical rows without a cursor, and a later tail publishes only
+		// its own interval. Serve a hash only inside the published interval.
+		if block.Number < cov.Start || block.Number > cov.Head {
+			return q, false, &ScopeError{Reason: fmt.Sprintf("block %d (%s) is outside the warehouse coverage %d-%d", block.Number, block.Hash.Hex(), cov.Start, cov.Head)}
+		}
 		q.FromBlock, q.ToBlock = block.Number, block.Number
 		return q, false, nil
 	}
