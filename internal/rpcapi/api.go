@@ -225,14 +225,17 @@ func resolveRange(ctx context.Context, v logstore.View, crit FilterCriteria, cov
 	if err != nil {
 		return q, false, err
 	}
+	if from > to {
+		return q, true, nil // geth answers [] for an inverted range, before any other consideration
+	}
 	if from > cov.Head || to > cov.Head {
 		return q, false, &ScopeError{Reason: fmt.Sprintf("blocks %d-%d extend above the warehouse head %d", from, to, cov.Head)}
 	}
-	if from < cov.Start && from <= to {
+	if from < cov.Start {
 		return q, false, &ScopeError{Reason: fmt.Sprintf("blocks %d-%d extend below the warehouse coverage start %d", from, to, cov.Start)}
 	}
 	q.FromBlock, q.ToBlock = from, to
-	return q, from > to, nil
+	return q, false, nil
 }
 
 // resolveSpecial maps geth's block tags onto the warehouse: latest is the

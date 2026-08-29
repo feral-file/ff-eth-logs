@@ -106,6 +106,15 @@ func TestGetLogs_GethErrorsAndEmpty(t *testing.T) {
 	assert.Empty(t, logs)
 	assert.Nil(t, wh.gotQ)
 
+	// An inverted range is [] even when one bound sits above the head or
+	// below coverage: geth decides emptiness before anything else.
+	wh.start, wh.gotQ = 50, nil
+	logs, err = api.GetLogs(ctx, FilterCriteria{FromBlock: big.NewInt(101), ToBlock: big.NewInt(rpc.EarliestBlockNumber.Int64()), Topics: transfer4()})
+	require.NoError(t, err)
+	assert.Empty(t, logs)
+	assert.Nil(t, wh.gotQ)
+	wh.start = 0
+
 	five := make([][]common.Hash, 5)
 	_, err = api.GetLogs(ctx, FilterCriteria{Topics: five})
 	assert.EqualError(t, err, "exceed max topics")

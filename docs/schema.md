@@ -70,7 +70,7 @@ Written in the same transaction as the unit's rows. A stage skips a unit only wh
 | `block_number` | `bigint NOT NULL` | the head: newest such block; `CHECK (coverage_start <= block_number)` |
 | `updated_at` | `timestamptz NOT NULL DEFAULT now()` | when the interval last moved |
 
-The row is the covered interval, and the API answers only inside it. Written in the same transaction as the blocks and logs it accounts for (`logstore.WriteRange`), so it is never ahead of the data; a write must be contiguous with the interval (`from ≤ head+1` and `to+1 ≥ coverage_start`, else `ErrCoverageGap`) and extends it. Absent before the first write or backfill `finish`; `eth_blockNumber` and `eth_getLogs` answer `out of warehouse scope: warehouse is empty` until then. `finish` publishes `[MIN(eth_blocks.number), MAX(eth_blocks.number)]` only after verifying the load. `rewind` lowers the head and refuses to move it forward or below `coverage_start`.
+The row is the covered interval, and the API answers only inside it. Written in the same transaction as the blocks and logs it accounts for (`logstore.WriteRange`), so it is never ahead of the data; a write must be contiguous with the interval (`from ≤ head+1` and `to+1 ≥ coverage_start`, else `ErrCoverageGap`) and extends it. Absent before the first write or backfill `finish`; `eth_blockNumber` and `eth_getLogs` answer `out of warehouse scope: warehouse is empty` until then. `finish` publishes the manifest's `[first, last]` only after verifying the database, the Parquet footers, the local files and the per-unit fingerprints against it. `rewind` lowers the head and refuses to move it forward or below `coverage_start`.
 
 ## 3. Partitions
 

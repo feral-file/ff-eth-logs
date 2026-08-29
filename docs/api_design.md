@@ -123,7 +123,7 @@ Exceeding `rpc.max_results` (default 100,000) returns `-32000 query returned mor
 | CryptoPunks `Assign(address,uint256)` | `0x8a0e37b73a0d9c82e205d4d1a3ff3d0b57ce5f4d7bccf6bac03336dc101cb7ba` | same |
 | CryptoPunks `PunkBought(uint256,uint256,address,address)` | `0x58e5d5a525e3b40bc15abaa38b5882678db1ee68befd2f60bafe3a7fd06db9e3` | same |
 
-The stored shapes are the ones the indexer's parsers accept; a node holds more (3-topic ERC-20 and 1-topic pre-standard `Transfer`s, nonstandard `MetadataUpdate`/`URI` shapes, CryptoPunks-signature events from other contracts). The warehouse never answers a filter those extra shapes could match — that is what the position-count and address rules above enforce — so an in-scope answer is exact and everything else is a scope error for the vendor.
+The stored shapes are the ones the indexer's parsers accept; a node holds more (3-topic ERC-20 and 1-topic pre-standard `Transfer`s, nonstandard `MetadataUpdate`/`URI` shapes, CryptoPunks-signature events from other contracts). An in-scope answer is therefore the vendor's answer minus those shapes and nothing else — for the Transfer family that means the ERC-20 and pre-standard logs a node would also return are absent; the CryptoPunks address rule above exists because for those signatures the omitted set would otherwise depend on the address filter. Everything else (coverage, event set, tags) is a scope error for the vendor.
 
 ## 4. What a routing client should do
 
