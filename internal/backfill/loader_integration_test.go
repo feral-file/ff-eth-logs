@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/parquet-go/parquet-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -42,6 +43,14 @@ type exportBlock struct {
 }
 
 func i64(v int64) *int64 { return &v }
+
+func tailBlocks(from, to uint64) []logstore.Block {
+	out := make([]logstore.Block, 0, to-from+1)
+	for n := from; n <= to; n++ {
+		out = append(out, logstore.Block{Number: n, Hash: common.BigToHash(big.NewInt(int64(n))), Timestamp: n * 10}) //nolint:gosec // test heights
+	}
+	return out
+}
 
 // gapFill produces the blocks strictly between the two runs the test's logs
 // sit in, so eth_blocks is contiguous without hand-writing a million rows in
@@ -241,4 +250,25 @@ func TestLoaderEndToEnd(t *testing.T) {
 	require.NoError(t, l.Finish(ctx))
 	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM eth_logs`).Scan(&n))
 	assert.Equal(t, 4, n)
+
+	// The tail then advances past the export end inside the same physical
+	// partition (part=001). A later logs/blocks/finish rerun must neither
+	// count, delete nor verify those rows, and must not lower the head.
+	tailLog := types.Log{BlockNumber: 1_000_006, Address: common.HexToAddress("0x9"), Topics: []common.Hash{common.HexToHash("0xa")}, Data: []byte{}}
+	require.NoError(t, store.WriteRange(ctx, 1_000_006, 1_000_008, tailBlocks(1_000_006, 1_000_008), []types.Log{tailLog}))
+	require.NoError(t, l.Logs(ctx))
+	require.NoError(t, l.Blocks(ctx))
+	require.NoError(t, l.Finish(ctx))
+	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM eth_logs WHERE block_number > 1000005`).Scan(&n))
+	assert.Equal(t, 1, n, "tail-written logs above the manifest end survive the rerun")
+	cov, _, err = store.Coverage(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, logstore.Coverage{Start: 7, Head: 1_000_008}, cov, "finish merges, it does not rewind the tail's head")
+
+	// And a backfill cannot run while a writer holds the warehouse.
+	release, err := store.AcquireWriterLock(ctx)
+	require.NoError(t, err)
+	_, err = l.Lock(ctx)
+	require.ErrorIs(t, err, logstore.ErrWriterBusy)
+	release()
 }

@@ -1,6 +1,6 @@
 # Operations
 
-Runbook for **FF Eth Logs**: first deployment, the backfill, reorg and catch-up procedures, monitoring, and deployment through ff-deploy. Commands assume the binary on the host or `docker compose exec`; every subcommand takes `-config <file>` and `-env <dir>`.
+Runbook for **FF Eth Logs**: first deployment, the backfill, reorg and catch-up procedures, monitoring, and deployment through ff-deploy. Commands assume the binary on the host or a one-off container (`docker compose run --rm ff-eth-logs …`); every subcommand takes `-config <file>` and `-env <dir>`. `backfill` and `serve` exclude each other through a database writer lock: a backfill stage against a running service fails with `another writer holds the warehouse` — stop the service first.
 
 ## 1. First deployment
 
@@ -182,7 +182,15 @@ Deployment order for a schema change: migration first (with ingestion stopped if
 
 ## 8. Backfill on the deployed host
 
-The `backfill` subcommand runs inside the same image against the same database — a one-off container with the export copy mounted and `backfill -config /app/config.yaml -dir <mounted export>` as the command — with the `serve` container stopped. Apply the PostgreSQL session settings from section 1.3 before starting.
+Run the backfill as a **one-off container with the service stopped**, never `docker compose exec` into the live container:
+
+```bash
+docker compose stop ff-eth-logs                       # the writer lock refuses a backfill against a live ingestion anyway
+docker compose run --rm ff-eth-logs backfill -config config.yaml -dir /data/v1
+docker compose start ff-eth-logs                      # resumes at the published head + 1
+```
+
+`make backfill DIR=/data/v1` does the same against the dev compose stack. The stages take the warehouse writer lock (`ingest`/`backfill` are mutually exclusive: `another writer holds the warehouse (serve ingestion or a backfill stage is running)`), operate only inside the manifest's block interval — rows the tail wrote above the export end are neither counted, deleted nor verified — and `finish` merges its verified interval into the existing coverage rather than lowering a head the tail has moved past.
 
 ## 9. Re-exporting from BigQuery
 

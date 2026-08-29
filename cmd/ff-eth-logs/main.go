@@ -143,6 +143,13 @@ func runServe(args []string) error {
 }
 
 func runIngestion(ctx context.Context, cfg *config.Config, store *logstore.Store) error {
+	// Held for the lifetime of ingestion: a backfill stage started against
+	// this database fails with ErrWriterBusy instead of racing the tail.
+	release, err := store.AcquireWriterLock(ctx)
+	if err != nil {
+		return fmt.Errorf("ingestion: %w", err)
+	}
+	defer release()
 	client, err := chain.Dial(ctx, cfg.Ethereum.WebSocketURL, cfg.Ethereum.RPCTimeout)
 	if err != nil {
 		return fmt.Errorf("dial ethereum websocket: %w", err)

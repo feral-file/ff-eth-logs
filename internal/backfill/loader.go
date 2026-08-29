@@ -52,6 +52,24 @@ type Loader struct {
 // logs/part=NNN/ and blocks/).
 func New(pool *pgxpool.Pool, dir string) *Loader { return &Loader{pool: pool, dir: dir} }
 
+// Lock takes the warehouse writer lock for the duration of a stage. Every
+// stage must run under it: serve's tail ingestion holds the same lock for
+// its lifetime, so a backfill against a live service fails immediately
+// with logstore.ErrWriterBusy instead of racing it.
+func (l *Loader) Lock(ctx context.Context) (func(), error) {
+	return logstore.NewFromPool(l.pool).AcquireWriterLock(ctx)
+}
+
+// unitInterval is the block range of a partition that the manifest covers:
+// the partition clipped to [Blocks.First, Blocks.Last]. Every count, delete
+// and verification uses it, so rows the tail wrote above the manifest end
+// (in the same physical partition) are neither counted nor deleted.
+func unitInterval(m *Manifest, part uint64) (lo, hi uint64) {
+	lo = max(part*logstore.PartitionBlocks, m.Blocks.First)
+	hi = min(part*logstore.PartitionBlocks+logstore.PartitionBlocks-1, m.Blocks.Last)
+	return lo, hi
+}
+
 // Prepare drops the secondary indexes so the bulk load only maintains the
 // primary key.
 func (l *Loader) Prepare(ctx context.Context) error {
@@ -108,8 +126,11 @@ func (l *Loader) verifyLoaded(ctx context.Context) (logstore.Coverage, error) {
 	if err != nil {
 		return logstore.Coverage{}, err
 	}
+	// Scoped to the manifest interval: rows the tail wrote above it (or a
+	// previous export left below it) are outside this verification.
 	var lo, hi, n *int64
-	if err := l.pool.QueryRow(ctx, `SELECT MIN(number), MAX(number), COUNT(*) FROM eth_blocks`).Scan(&lo, &hi, &n); err != nil {
+	if err := l.pool.QueryRow(ctx, `SELECT MIN(number), MAX(number), COUNT(*) FROM eth_blocks WHERE number BETWEEN $1 AND $2`,
+		int64(m.Blocks.First), int64(m.Blocks.Last)).Scan(&lo, &hi, &n); err != nil { //nolint:gosec // fits int64
 		return logstore.Coverage{}, fmt.Errorf("read blocks: %w", err)
 	}
 	if lo == nil {
@@ -179,18 +200,14 @@ func (l *Loader) verifyPart(ctx context.Context, m *Manifest, part uint64) error
 	if footer != want {
 		return fmt.Errorf("part %03d files hold %d rows, %s says %d; the copy is incomplete", part, footer, ManifestName, want)
 	}
-	lo := part * logstore.PartitionBlocks
+	lo, hi := unitInterval(m, part)
 	var got int64
-	var maxBlock *int64
-	if err := l.pool.QueryRow(ctx, `SELECT COUNT(*), MAX(block_number) FROM eth_logs WHERE block_number BETWEEN $1 AND $2`,
-		int64(lo), int64(lo+logstore.PartitionBlocks-1)).Scan(&got, &maxBlock); err != nil { //nolint:gosec // fits int64
+	if err := l.pool.QueryRow(ctx, `SELECT COUNT(*) FROM eth_logs WHERE block_number BETWEEN $1 AND $2`,
+		int64(lo), int64(hi)).Scan(&got); err != nil { //nolint:gosec // fits int64
 		return fmt.Errorf("count partition %d: %w", part, err)
 	}
 	if got != want {
 		return fmt.Errorf("part %03d has %d rows in the database, %s says %d; run the logs stage", part, got, ManifestName, want)
-	}
-	if maxBlock != nil && uint64(*maxBlock) > m.Blocks.Last { //nolint:gosec // non-negative
-		return fmt.Errorf("part %03d has logs at block %d above the manifest's newest block %d", part, *maxBlock, m.Blocks.Last)
 	}
 	return nil
 }
@@ -270,8 +287,7 @@ func (l *Loader) loadPart(ctx context.Context, m *Manifest, part uint64) error {
 		return err
 	}
 	dir := filepath.Join(l.dir, filepath.FromSlash(manifestPartDir(part)))
-	lo := part * logstore.PartitionBlocks
-	hi := lo + logstore.PartitionBlocks - 1
+	lo, hi := unitInterval(m, part)
 	files, err := parquetFiles(dir)
 	if err != nil {
 		return err
@@ -301,7 +317,7 @@ func (l *Loader) loadPart(ctx context.Context, m *Manifest, part uint64) error {
 		return err
 	}
 	defer conn.Release()
-	if _, err := conn.Exec(ctx, logstore.PartitionDDL(lo)); err != nil {
+	if _, err := conn.Exec(ctx, logstore.PartitionDDL(part*logstore.PartitionBlocks)); err != nil {
 		return fmt.Errorf("ensure partition for part %d: %w", part, err)
 	}
 	// One transaction per partition: staging is unlogged and temporary to the
@@ -327,6 +343,13 @@ func (l *Loader) loadPart(ctx context.Context, m *Manifest, part uint64) error {
 	}
 	if rows != want {
 		return fmt.Errorf("part %03d files hold %d rows, %s says %d; the copy is incomplete", part, rows, ManifestName, want)
+	}
+	var outside int64
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM staging_logs WHERE block_number < $1 OR block_number > $2`, int64(lo), int64(hi)).Scan(&outside); err != nil { //nolint:gosec // fits int64
+		return fmt.Errorf("check staged rows of part %d: %w", part, err)
+	}
+	if outside != 0 {
+		return fmt.Errorf("part %03d files hold %d rows outside blocks %d-%d", part, outside, lo, hi)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO eth_logs SELECT * FROM staging_logs ORDER BY block_number, log_index`); err != nil {
 		return fmt.Errorf("insert part %d: %w", part, err)

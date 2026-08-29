@@ -349,3 +349,37 @@ func TestAbandonedReadsDoNotChurnPool(t *testing.T) {
 	require.NoError(t, s.Read(ctx, func(v View) error { _, _, err := v.Coverage(ctx); return err }))
 	assert.Equal(t, before, pool.Stat().NewConnsCount(), "no connection was discarded and reopened")
 }
+
+// TestWriterLockIsExclusive pins the guard between serve's ingestion and the
+// backfill: the second holder is refused with ErrWriterBusy until the first
+// releases, and the lock lives on the connection (released with it).
+func TestWriterLockIsExclusive(t *testing.T) {
+	ctx := context.Background()
+	s := NewFromPool(testdb.Open(t))
+	release, err := s.AcquireWriterLock(ctx)
+	require.NoError(t, err)
+	_, err = s.AcquireWriterLock(ctx)
+	require.ErrorIs(t, err, ErrWriterBusy)
+	release()
+	release2, err := s.AcquireWriterLock(ctx)
+	require.NoError(t, err)
+	release2()
+}
+
+// TestSetCoverageMergesWithTailProgress pins that publishing a verified
+// interval never lowers a head the tail has moved past it, and refuses an
+// interval that does not touch the existing coverage.
+func TestSetCoverageMergesWithTailProgress(t *testing.T) {
+	ctx := context.Background()
+	s := NewFromPool(testdb.Open(t))
+	require.NoError(t, s.SetCoverage(ctx, Coverage{Start: 10, Head: 20}))
+	require.NoError(t, s.WriteRange(ctx, 21, 25, blocksFor(21, 25), nil)) // the tail advances
+	require.NoError(t, s.SetCoverage(ctx, Coverage{Start: 10, Head: 20}), "a finish rerun")
+	cov, _, err := s.Coverage(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, Coverage{Start: 10, Head: 25}, cov, "the tail's head is kept")
+	require.NoError(t, s.SetCoverage(ctx, Coverage{Start: 5, Head: 9}), "adjacent below extends the start")
+	cov, _, _ = s.Coverage(ctx)
+	assert.Equal(t, Coverage{Start: 5, Head: 25}, cov)
+	assert.ErrorIs(t, s.SetCoverage(ctx, Coverage{Start: 40, Head: 50}), ErrCoverageGap)
+}

@@ -1,5 +1,5 @@
 .PHONY: help build rebuild run quickstart up down start stop restart logs logs-component ps clean config \
-	up-infra up-app dev setup check-env health \
+	up-infra up-app stop-app backfill dev setup check-env health \
 	imports fmt fmt-check lint test test-integration mocks check
 
 # Docker Compose settings
@@ -75,6 +75,14 @@ down: ## Stop and remove services
 
 stop: ## Stop services
 	@$(DOCKER_COMPOSE) stop
+
+stop-app: ## Stop the app only (keep PostgreSQL); required before a backfill
+	@$(DOCKER_COMPOSE) stop $(APP_SERVICE)
+
+backfill: check-env ## Run the backfill as a one-off container against the compose PostgreSQL (DIR=/data/v1, STAGE=all); stops the app first
+	@$(DOCKER_COMPOSE) stop $(APP_SERVICE)
+	@$(DOCKER_COMPOSE) run --rm $(APP_SERVICE) backfill -config config.yaml -dir $(or $(DIR),/data/v1) -stage $(or $(STAGE),all)
+	@echo "$(COLOR_YELLOW)Backfill done; start the app with 'make up-app'$(COLOR_RESET)"
 
 restart: ## Restart services
 	@$(DOCKER_COMPOSE) restart

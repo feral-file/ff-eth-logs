@@ -42,7 +42,9 @@ services:
         condition: service_healthy
     volumes:
       - ../../cmd/ff-eth-logs/config.yaml.sample:/app/config.yaml:ro
-      # Drop the Parquet export here for `docker compose exec ff-eth-logs ./ff-eth-logs backfill -dir /data/v1`.
+      # The Parquet export for the backfill. Run it as a one-off container with
+      # the service STOPPED (the writer lock refuses a backfill against a live
+      # ingestion): make stop-app && docker compose run --rm ff-eth-logs backfill -config config.yaml -dir /data/v1 && make up-app
       - ../../data:/data:ro
     env_file:
       - ../../config/.env

@@ -34,6 +34,13 @@ func runBackfill(args []string) error {
 	defer store.Close()
 	ctx = logger.WithComponent(ctx, logger.ComponentBackfill)
 	loader := backfill.New(store.Pool(), dir)
+	// Exclusive with serve's tail ingestion: a stage against a live writer
+	// fails here instead of deleting partitions under it.
+	release, err := loader.Lock(ctx)
+	if err != nil {
+		return fmt.Errorf("backfill: %w (stop the service first)", err)
+	}
+	defer release()
 	stages := map[string]func(context.Context) error{
 		"prepare": loader.Prepare, "logs": loader.Logs, "blocks": loader.Blocks, "finish": loader.Finish,
 	}

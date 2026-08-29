@@ -262,19 +262,68 @@ func setCoverage(ctx context.Context, tx pgx.Tx, cov Coverage) error {
 	return nil
 }
 
-// SetCoverage publishes a coverage interval outside a write. Only the
-// backfill uses it, after it has verified that every block and every export
-// partition in the interval is loaded.
+// SetCoverage publishes a verified interval. Only the backfill uses it,
+// after it has verified that every block and every export partition in the
+// interval is loaded. An existing interval is merged, not replaced: a
+// finish rerun after the tail has advanced past the export end must not
+// lower the head below blocks the tail wrote, and the two intervals must
+// touch (ErrCoverageGap otherwise) so the union is still one contiguous run.
 func (s *Store) SetCoverage(ctx context.Context, cov Coverage) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer rollback(tx)
+	existing, ok, err := readCoverage(ctx, tx, true)
+	if err != nil {
+		return err
+	}
+	if ok {
+		if cov.Start > existing.Head+1 || cov.Head+1 < existing.Start {
+			return fmt.Errorf("%w: verified interval %d-%d vs existing coverage %d-%d", ErrCoverageGap, cov.Start, cov.Head, existing.Start, existing.Head)
+		}
+		cov = Coverage{Start: min(cov.Start, existing.Start), Head: max(cov.Head, existing.Head)}
+	}
 	if err := setCoverage(ctx, tx, cov); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// writerLockKey is the advisory lock every writer of the warehouse holds:
+// tail ingestion for its lifetime, each backfill stage for its duration.
+const writerLockKey = 0x66665f6574685f6c // "ff_eth_l"
+
+// ErrWriterBusy is returned when another writer (serve's ingestion or a
+// backfill) holds the warehouse.
+var ErrWriterBusy = errors.New("another writer holds the warehouse (serve ingestion or a backfill stage is running)")
+
+// AcquireWriterLock takes the session-level advisory lock on a dedicated
+// connection and returns its release. Reason: the backfill deletes and
+// reloads whole partitions and publishes coverage from a manifest, while
+// tail ingestion appends above the head and moves the cursor; interleaving
+// the two silently corrupts served ranges, and a runbook line is not a
+// guard. The lock is held by the connection, so a crash releases it.
+func (s *Store) AcquireWriterLock(ctx context.Context) (func(), error) {
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire connection for writer lock: %w", err)
+	}
+	var got bool
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, writerLockKey).Scan(&got); err != nil {
+		conn.Release()
+		return nil, fmt.Errorf("writer lock: %w", err)
+	}
+	if !got {
+		conn.Release()
+		return nil, ErrWriterBusy
+	}
+	return func() {
+		unlockCtx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
+		defer cancel()
+		_, _ = conn.Exec(unlockCtx, `SELECT pg_advisory_unlock($1)`, writerLockKey)
+		conn.Release()
+	}, nil
 }
 
 // blockColumns / logColumns are the COPY column lists, shared with the backfill.
