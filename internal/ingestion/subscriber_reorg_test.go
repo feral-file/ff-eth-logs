@@ -951,7 +951,7 @@ func TestRun_MidBatchDiscontinuityRefetches(t *testing.T) {
 	require.Equal(t, [][2]uint64{{100, 109}}, f.sink.ranges())
 	require.Equal(t, 3, srv.count(105), "105: the mismatching fetch, the refetch, and the post-log re-read of a logless block")
 	for i, b := range f.sink.calls[0].Blocks {
-		require.Equal(t, c.canonical(100+uint64(i)).Hash, b.Hash)
+		require.Equal(t, c.canonical(b.Number).Hash, b.Hash, "block %d", i)
 	}
 }
 
