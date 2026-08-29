@@ -123,6 +123,10 @@ func TestLoaderEndToEnd(t *testing.T) {
 	// The live blocks table advanced after the logs extract: the export holds
 	// blocks above the manifest's end. They must not be loaded.
 	writeParquet(t, filepath.Join(dir, "blocks", "blocks-000000000002.parquet"), gapFill(1_000_006, 1_000_010))
+	// The export also writes zero-row files for empty shards (a 428-byte file
+	// with one empty row group); the loader must read past them.
+	writeParquet(t, filepath.Join(dir, "blocks", "blocks-000000000003.parquet"), []exportBlock{})
+	writeParquet(t, filepath.Join(dir, "logs", "part=001", "logs-000000000002.parquet"), []exportLog{})
 
 	l := New(pool, dir)
 	// No manifest: finish and the blocks stage refuse before touching anything.

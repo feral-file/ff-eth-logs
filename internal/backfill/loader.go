@@ -441,6 +441,12 @@ func copyParquetWhere(ctx context.Context, tx pgx.Tx, path, table string, column
 	}
 	var total int64
 	for _, rg := range pf.RowGroups() {
+		// The export writes a zero-row file for an empty shard (one empty row
+		// group); parquet-go's row reader seeks past the end of such a group
+		// ("Seek: invalid offset"), so it is skipped rather than read.
+		if rg.NumRows() == 0 {
+			continue
+		}
 		src := &parquetSource{ctx: ctx, rows: rg.Rows(), cols: cols, mapRow: mapRow, keep: keep, buf: make([]parquet.Row, 1024)}
 		n, err := tx.CopyFrom(ctx, pgx.Identifier{table}, columns, src)
 		_ = src.rows.Close()
