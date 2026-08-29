@@ -26,12 +26,15 @@ func (s *fakeStore) Cursor(context.Context) (uint64, bool, error) {
 	return s.cursor, s.hasCursor, s.cursorErr
 }
 
-// runnerFixture wires a fixture whose first head is `head` and a store, and
-// scripts the sink to cancel the run after its first write, so each start
-// path is observed through the first written range.
-func runnerFixture(t *testing.T, headHeight uint64, store *fakeStore) (*fixture, *headChain, context.Context) {
+// runnerFixture wires a fixture whose first head is at headHeight on a
+// canonical chain anchored at from-1 (the resume point the run verifies and
+// bridges to), plus a store, and scripts the sink to cancel the run after its
+// first write, so each start path is observed through the first written range.
+func runnerFixture(t *testing.T, from, headHeight uint64, store *fakeStore) (*fixture, *headChain, context.Context) {
 	t.Helper()
 	c := &headChain{}
+	c.anchor(from)
+	c.extend(headHeight - 1)
 	f := newFixture(t, c.next(headHeight))
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -48,7 +51,7 @@ func TestRun_StartBlockStartsAnEmptyWarehouse(t *testing.T) {
 	t.Parallel()
 
 	store := &fakeStore{}
-	f, _, ctx := runnerFixture(t, 500, store)
+	f, _, ctx := runnerFixture(t, 500, 500, store)
 
 	err := ingestion.Run(ctx, ingestion.RunConfig{ChainID: 1, Config: ingestion.Config{MaxCatchupBlocks: 10}, StartBlock: 500}, f.client, store)
 	require.ErrorIs(t, err, context.Canceled)
@@ -78,7 +81,7 @@ func TestRun_ResumesFromCursorPlusOne(t *testing.T) {
 	t.Parallel()
 
 	store := &fakeStore{cursor: 199, hasCursor: true}
-	f, _, ctx := runnerFixture(t, 205, store)
+	f, _, ctx := runnerFixture(t, 200, 205, store)
 
 	err := ingestion.Run(ctx, ingestion.RunConfig{ChainID: 1, Config: ingestion.Config{MaxCatchupBlocks: 10}}, f.client, store)
 	require.ErrorIs(t, err, context.Canceled)
@@ -93,7 +96,7 @@ func TestRun_StartsAtHeadWithoutCursor(t *testing.T) {
 	t.Parallel()
 
 	store := &fakeStore{}
-	f, _, ctx := runnerFixture(t, 300, store)
+	f, _, ctx := runnerFixture(t, 300, 300, store)
 	f.client.EXPECT().BlockNumber(gomock.Any()).Return(uint64(300), nil)
 
 	err := ingestion.Run(ctx, ingestion.RunConfig{ChainID: 1}, f.client, store)
@@ -139,8 +142,10 @@ func TestRun_PropagatesSubscriberErrors(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	anchor := c.anchor(100)
 	f := newFixture(t, c.next(1_000))
 	f.client.EXPECT().ChainID(gomock.Any()).Return(uint64(1), nil)
+	f.expectHead(99, anchor) // the resume anchor; the bound trips before any bridge walk
 	store := &fakeStore{cursor: 99, hasCursor: true}
 
 	err := ingestion.Run(context.Background(), ingestion.RunConfig{ChainID: 1, Config: ingestion.Config{MaxCatchupBlocks: 100}}, f.client, store)

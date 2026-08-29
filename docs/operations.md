@@ -29,6 +29,30 @@ gcloud storage cp -r gs://eth-logs/eth-log-warehouse/v1 ./data/
 
 The copy (≈ 16 GB) is only needed for the load; it is the disaster-recovery source and stays in GCS.
 
+**The manifest.** `finish` requires `manifest.json` at the export root and refuses to publish coverage without it. It is generated from the export's source, not from the downloaded files, so that a partial or corrupted copy can never match it:
+
+```json
+{
+  "export": "eth-log-warehouse/v1",
+  "source": "bigquery-public-data.crypto_ethereum, extract of 2026-08-28",
+  "blocks": {"first": 0, "last": 25842829, "rows": 25842830},
+  "logs":   {"rows": 402266375, "parts": {"000": 0, "001": 0, "...": 0, "025": 123456}},
+  "files":  {"logs/part=016/logs-000000000000.parquet": {"size": 11543755, "md5": "<base64>"}, "blocks/blocks-000000000000.parquet": {"size": 300706, "md5": "<base64>"}}
+}
+```
+
+- `blocks` and `logs` come from BigQuery, against the materialized extract table (cents to run):
+  ```sql
+  SELECT DIV(block_number, 1000000) AS part, COUNT(*) AS rows FROM `indexer-eth-logs.eth_warehouse.logs` GROUP BY part ORDER BY part;
+  SELECT COUNT(*) AS rows FROM `indexer-eth-logs.eth_warehouse.logs`;
+  SELECT MIN(number) AS first, MAX(number) AS last, COUNT(*) AS rows FROM `bigquery-public-data.crypto_ethereum.blocks` WHERE number <= 25842829;
+  ```
+  Every partition from `first/1000000` to `last/1000000` must have an entry, zero for the empty ones.
+- `files` comes from the objects as GCS stores them: `gcloud storage ls --format=json -r 'gs://eth-logs/eth-log-warehouse/v1/**'` yields `size` and `md5_hash` (base64) per object; the key is the object path relative to the export root.
+
+Assemble the three into `manifest.json`, upload it next to the export (`gs://eth-logs/eth-log-warehouse/v1/manifest.json`) so every copy carries it, and never edit it on the loading host. The `v0-rehearsal` prefix deliberately has no manifest.
+
+
 ### 1.3 Run the backfill
 
 With the service **not running** (or `ethereum.ingestion_enabled=false`) on the empty warehouse:
@@ -42,7 +66,7 @@ Stages run in order and are each idempotent (`-stage prepare|logs|blocks|finish`
 1. `prepare` — drops the four secondary indexes (`Dropped index for bulk load`).
 2. `logs` — one transaction per `part=NNN` directory: COPY into a temp staging table, `INSERT … ORDER BY (block_number, log_index)` into the partition (`Partition loaded` with `rows` and `took`; `Partition already loaded, skipping` on re-run). The busiest partition holds ~60 M rows and is sorted by PostgreSQL.
 3. `blocks` — all 4,048 files into `eth_blocks` in one transaction (`Blocks load progress` every 500 files).
-4. `finish` — verifies the load (every `logs/part=NNN` directory's Parquet row count must equal the rows in its partition, and `eth_blocks` must be one contiguous run; otherwise `backfill is not complete, cursor not set: …` and nothing is published), recreates the indexes (`Index ready` per index with `took`), `ANALYZE`, publishes coverage `[MIN(eth_blocks.number), MAX(eth_blocks.number)]` (`Backfill finished; coverage published`). Until `finish` succeeds the API reports the warehouse as empty.
+4. `finish` — verifies the load against `manifest.json` at the export root (section 1.2): `eth_blocks` must be exactly the manifest's interval and row count; every partition the interval implies must exist and hold the manifest's row count both in its Parquet footers and in the database; every listed file must match its recorded size and MD5 and no unlisted Parquet file may be present. Any mismatch is `backfill is not complete, cursor not set: …` and nothing is published. Then it recreates the indexes (`Index ready` per index with `took`), `ANALYZE`, and publishes coverage `[manifest first, manifest last]` (`Backfill finished; coverage published`). Until `finish` succeeds the API reports the warehouse as empty.
 
 **Durations are not yet measured** — record the `took` fields of the first production run here. Session-level PostgreSQL settings that matter: `maintenance_work_mem` for the four index builds over 400 M rows (e.g. `maintenance_work_mem = '2GB'`), `work_mem` for the per-partition sort (anything below the partition size spills to an external sort, which is correct but slower), and enough WAL headroom (`max_wal_size`) for a multi-GB COPY per transaction. Set them in `postgresql.conf` for the load or `ALTER SYSTEM`, and reset afterwards.
 
@@ -100,7 +124,7 @@ The gap from the cursor to the tip exceeds the bound; the bound exists so a stal
 
 The stages are idempotent, so the same command resumes after a failure. To reload one partition deliberately (a corrupt copy, a re-exported directory): stop the service, empty the partition (`TRUNCATE eth_logs_pNNN`), run `-stage logs` (only that directory loads), then `-stage finish` (indexes already exist — tolerated — and the cursor is re-derived from `eth_blocks`). If the indexes were not dropped first the reload is slower but correct.
 
-`finish` verifies that what is on disk is fully loaded, not that the export itself is complete: an export whose logs are a deliberate subset (the one-day `v0-rehearsal` prefix) would publish full coverage over blocks whose logs are missing. Only the full `v1` export (or a full re-export) is a valid input; never `finish` a partial one.
+`finish` trusts only `manifest.json`, which is written from the export's *source* (BigQuery row counts, GCS checksums), never from the copy: a partial export (the one-day `v0-rehearsal` prefix has no manifest and is refused) or a truncated copy cannot match it. Only an export with a manifest — `v1`, or a full re-export with a freshly generated manifest — is a valid input.
 
 Never run `backfill` while ingestion is writing: `finish` would publish coverage from `eth_blocks` under a concurrent writer, and `prepare` would drop the indexes the API is serving from.
 

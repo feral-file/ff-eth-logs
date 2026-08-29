@@ -92,6 +92,26 @@ func (c *headChain) canonical(n uint64) *chain.BlockHead {
 	return c.store(h)
 }
 
+// anchor builds the canonical block at from-1 — the resume point a run
+// starting at from verifies first (eth_getBlockByNumber) and retains as the
+// bridge every later head must chain back to — and makes it the parent of
+// the next head built.
+func (c *headChain) anchor(from uint64) *chain.BlockHead {
+	c.last = c.canonical(from - 1)
+	return c.last
+}
+
+// extend synthesizes canonical heads from the last built one through n, in
+// order, so the next head built descends from a contiguous canonical run:
+// the shape a first head ahead of the resume point needs, since reconcile
+// bridges every height between them by number and drops a head whose
+// ancestry the node does not confirm.
+func (c *headChain) extend(n uint64) {
+	for k := uint64(c.last.Number) + 1; k <= n; k++ {
+		c.last = c.canonical(k)
+	}
+}
+
 func head(n uint64, hash, parent common.Hash) *chain.BlockHead {
 	return &chain.BlockHead{Number: hexutil.Uint64(n), Hash: hash, ParentHash: parent, Timestamp: hexutil.Uint64(baseTimestamp + n)}
 }
@@ -286,6 +306,18 @@ func (f *fixture) expectRecheckHeads(c *headChain, from, to uint64) []*gomock.Ca
 	return f.expectMetadataHeads(c, from, to)
 }
 
+// expectBridgeHeads pins the descending eth_getBlockByNumber walk reconcile
+// makes for a head above the retained chain: heights hi down to lo, none of
+// which a subscription head covered, are fetched and retained canonical
+// until the walk rejoins the retained chain below lo.
+func (f *fixture) expectBridgeHeads(c *headChain, hi, lo uint64) []*gomock.Call {
+	var calls []*gomock.Call
+	for n := hi + 1; n > lo; n-- {
+		calls = append(calls, f.expectHead(n-1, c.canonical(n-1)))
+	}
+	return calls
+}
+
 func inOrder(calls ...*gomock.Call) {
 	args := make([]any, len(calls))
 	for i, c := range calls {
@@ -309,11 +341,12 @@ func blockOf(h *chain.BlockHead) logstore.Block {
 // TestRun_WritesEachHeadBlock pins the steady-state contract: with no gap and
 // no lag, every head triggers exactly one fetch and one write for that block,
 // with the block's metadata taken from the received head (no
-// eth_getBlockByNumber) and the kept logs attached.
+// eth_getBlockByNumber beyond the resume anchor) and the kept logs attached.
 func TestRun_WritesEachHeadBlock(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	anchor := c.anchor(100)
 	h100 := c.next(100)
 	f := newFixture(t, h100)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -322,6 +355,7 @@ func TestRun_WritesEachHeadBlock(t *testing.T) {
 	h101 := c.next(101)
 	log100, log101 := transferLog(100, 3), transferLog(101, 0)
 	inOrder(
+		f.expectHead(99, anchor), // resume point anchored first
 		f.expectLogs(100, 100, log100),
 		f.expectLogs(101, 101, log101),
 	)
@@ -338,11 +372,13 @@ func TestRun_WritesEachHeadBlock(t *testing.T) {
 // TestRun_FillsGapToHead pins the resume contract: when the first head is
 // ahead of fromBlock (restart or socket drop), the whole gap is written before
 // live blocks continue from head+1, with metadata for the unreceived heights
-// fetched by number.
+// fetched by number (the bridge walk from the head down to the resume anchor).
 func TestRun_FillsGapToHead(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	c.anchor(100)
+	c.extend(104)
 	f := newFixture(t, c.next(105))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -371,6 +407,8 @@ func TestRun_CatchupIsBatched(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	c.anchor(100)
+	c.extend(124)
 	f := newFixture(t, c.next(125))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -399,12 +437,13 @@ func TestRun_CoalescesQueuedHeads(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	anchor := c.anchor(100)
 	f := newFixture(t, c.next(100), c.next(101), c.next(102))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// One fetch for the coalesced range; the logless blocks are re-read after it.
-	inOrder(append([]*gomock.Call{f.expectLogs(100, 102)}, f.expectRecheckHeads(c, 100, 102)...)...)
+	inOrder(append([]*gomock.Call{f.expectHead(99, anchor), f.expectLogs(100, 102)}, f.expectRecheckHeads(c, 100, 102)...)...)
 	f.sink.steps = []func(uint64, uint64) error{thenCancel(cancel)}
 
 	err := f.run(ctx, ingestion.Config{}, 100)
@@ -419,11 +458,13 @@ func TestRun_WritesOnlyConfirmedBlocks(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	anchor := c.anchor(100)
 	f := newFixture(t, c.next(100), c.next(101), c.next(102))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	inOrder(
+		f.expectHead(99, anchor),
 		f.expectLogs(100, 100), f.expectHead(100, c.canonical(100)),
 		f.expectLogs(101, 101), f.expectHead(101, c.canonical(101)),
 	)
@@ -441,12 +482,14 @@ func TestRun_KeepsOnlyWarehouseShapedLogs(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	anchor := c.anchor(100)
 	f := newFixture(t, c.next(100))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	erc20 := types.Log{BlockNumber: 100, Index: 0, Topics: []common.Hash{eventset.Transfer, {}, {}}}
 	erc721 := transferLog(100, 1)
+	f.expectHead(99, anchor)
 	f.expectLogs(100, 100, erc20, erc721)
 	f.sink.steps = []func(uint64, uint64) error{thenCancel(cancel)}
 
@@ -462,6 +505,7 @@ func TestRun_DuplicateHeadAtWrittenHeightIsIgnored(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	anchor := c.anchor(100)
 	h100 := c.next(100)
 	f := newFixture(t, h100)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -469,6 +513,7 @@ func TestRun_DuplicateHeadAtWrittenHeightIsIgnored(t *testing.T) {
 
 	h101 := c.next(101)
 	inOrder(
+		f.expectHead(99, anchor),
 		f.expectLogs(100, 100), f.expectHead(100, h100),
 		f.expectLogs(101, 101), f.expectHead(101, h101),
 	)
@@ -487,6 +532,7 @@ func TestRun_FutureStartBlockIsHardLowerBound(t *testing.T) {
 
 	c := &headChain{}
 	h400, h401 := c.next(400), c.next(401)
+	anchor := c.anchor(500) // the start block's parent, verified at start
 	h500 := c.next(500)
 	f := newFixture(t, h400, h401, h500)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -495,6 +541,7 @@ func TestRun_FutureStartBlockIsHardLowerBound(t *testing.T) {
 	h501 := c.next(501)
 	below := c.fork(499) // a replacement below the start block: ignored
 	inOrder(
+		f.expectHead(499, anchor),
 		f.expectLogs(500, 500), f.expectHead(500, h500),
 		f.expectLogs(501, 501), f.expectHead(501, h501),
 	)
@@ -513,6 +560,8 @@ func TestRun_WritesEveryBatchAndStopsOnLateFetchFailure(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	c.anchor(100)
+	c.extend(124)
 	f := newFixture(t, c.next(125))
 
 	fetchErr := errors.New("provider 503")
@@ -535,6 +584,8 @@ func TestRun_SinkErrorStops(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	c.anchor(100)
+	c.extend(104)
 	f := newFixture(t, c.next(105))
 
 	log103 := transferLog(103, 0)
@@ -556,7 +607,9 @@ func TestRun_CatchupTooLargeFails(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	anchor := c.anchor(1)
 	f := newFixture(t, c.next(1_000_000))
+	f.expectHead(0, anchor) // only the resume anchor is fetched: the bound trips before any bridge walk
 
 	err := f.run(context.Background(), ingestion.Config{MaxCatchupBlocks: 50_000}, 1)
 	require.ErrorIs(t, err, ingestion.ErrCatchupTooLarge)
@@ -567,8 +620,9 @@ func TestRun_CatchupTooLargeFails(t *testing.T) {
 // TestRun_CatchupBoundCoversPendingWindow pins that the bound is measured on
 // the whole gap to the tip, not just the confirmed range: with lag 2 and max
 // 10, a tip 12 blocks past the start is rejected even though only 10 would be
-// written now, while a tip 10 past the start is accepted — and the written
-// boundary's head, absent from the subscription, is fetched by number.
+// written now, while a tip 10 past the start is accepted — and every height
+// absent from the subscription, the written boundary included, is bridged by
+// number from the tip down to the resume anchor before anything is fetched.
 func TestRun_CatchupBoundCoversPendingWindow(t *testing.T) {
 	t.Parallel()
 	cfg := ingestion.Config{MaxCatchupBlocks: 10, ConfirmationBlocks: 2}
@@ -576,7 +630,9 @@ func TestRun_CatchupBoundCoversPendingWindow(t *testing.T) {
 	t.Run("gap of max+lag is rejected", func(t *testing.T) {
 		t.Parallel()
 		c := &headChain{}
+		anchor := c.anchor(100)
 		f := newFixture(t, c.next(111))
+		f.expectHead(99, anchor) // the bound trips before the bridge walk spends a call
 
 		err := f.run(context.Background(), cfg, 100)
 		require.ErrorIs(t, err, ingestion.ErrCatchupTooLarge)
@@ -586,23 +642,24 @@ func TestRun_CatchupBoundCoversPendingWindow(t *testing.T) {
 	t.Run("gap of exactly max is accepted", func(t *testing.T) {
 		t.Parallel()
 		c := &headChain{}
+		anchor := c.anchor(100)
+		c.extend(108)
 		f := newFixture(t, c.next(109))
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		boundary := head(107, common.HexToHash("0x107"), common.HexToHash("0x106"))
-		calls := []*gomock.Call{f.expectHead(107, boundary)}         // written boundary retained
-		calls = append(calls, f.expectMetadataHeads(c, 100, 106)...) // metadata first, then the logs
+		boundary := c.canonical(107)
+		calls := []*gomock.Call{f.expectHead(99, anchor)}
+		calls = append(calls, f.expectBridgeHeads(c, 108, 100)...) // 108..100 bridged down to the anchor, boundary included
 		calls = append(calls, f.expectLogs(100, 107))
-		calls = append(calls, f.expectRecheckHeads(c, 100, 106)...) // no logs: every block is re-read
-		calls = append(calls, f.expectHead(107, boundary))
+		calls = append(calls, f.expectRecheckHeads(c, 100, 107)...) // no logs: every block is re-read
 		inOrder(calls...)
 		f.sink.steps = []func(uint64, uint64) error{thenCancel(cancel)}
 
 		err := f.run(ctx, cfg, 100)
 		require.ErrorIs(t, err, context.Canceled)
 		require.Equal(t, [][2]uint64{{100, 107}}, f.sink.ranges())
-		require.Equal(t, blockOf(boundary), f.sink.calls[0].Blocks[7], "the boundary block carries the fetched head")
+		require.Equal(t, blockOf(boundary), f.sink.calls[0].Blocks[7], "the boundary block carries the bridged canonical head")
 	})
 }
 
@@ -612,6 +669,8 @@ func TestRun_UnboundedCatchupWhenZero(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	c.anchor(1)
+	c.extend(999)
 	f := newFixture(t, c.next(1_000))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -629,9 +688,11 @@ func TestRun_FetchErrorFails(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	anchor := c.anchor(100)
 	f := newFixture(t, c.next(100))
 
 	fetchErr := errors.New("rpc down")
+	f.expectHead(99, anchor)
 	f.client.EXPECT().FilterLogs(gomock.Any(), logsFor(100, 100)).Return(nil, fetchErr)
 
 	err := f.run(context.Background(), ingestion.Config{}, 100)
@@ -659,6 +720,7 @@ func TestRun_SubscriptionErrorFails(t *testing.T) {
 	t.Parallel()
 
 	f := newFixture(t)
+	f.expectHead(99, (&headChain{}).anchor(100)) // the resume point is anchored before the loop reads the error
 	transportErr := errors.New("websocket closed 1006")
 	f.subErr <- transportErr
 
@@ -671,6 +733,7 @@ func TestRun_ContextCancelReturnsCtxErr(t *testing.T) {
 	t.Parallel()
 
 	f := newFixture(t)
+	f.expectHead(99, (&headChain{}).anchor(100)) // the resume point is anchored before the loop sees the cancel
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 

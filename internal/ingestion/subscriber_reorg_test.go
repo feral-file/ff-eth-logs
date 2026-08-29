@@ -27,6 +27,7 @@ func TestRun_ShallowReorgWithinLagIsAbsorbed(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	anchor := c.anchor(100)
 	a100, a101, a102 := c.next(100), c.next(101), c.next(102)
 	f := newFixture(t, a100, a101, a102)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -35,6 +36,7 @@ func TestRun_ShallowReorgWithinLagIsAbsorbed(t *testing.T) {
 	// 100 written; then 102 is replaced (fork) and 103 builds on the fork.
 	// Tip 103 confirms 101 only — no re-write of 100, 102 not yet written.
 	inOrder(
+		f.expectHead(99, anchor),
 		f.expectLogs(100, 100), f.expectHead(100, a100),
 		f.expectLogs(101, 101), f.expectHead(101, a101),
 	)
@@ -93,6 +95,7 @@ func TestRun_TipOnlyReorgReconcilesToWrittenBoundary(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	anchor := c.anchor(100)
 	a100, a101, a102 := c.next(100), c.next(101), c.next(102)
 	_ = a101
 	f := newFixture(t, a100, a101, a102)
@@ -103,6 +106,7 @@ func TestRun_TipOnlyReorgReconcilesToWrittenBoundary(t *testing.T) {
 	b102 := head(102, common.HexToHash("0xb102"), b101.Hash)
 	b103 := c.orphanTip(103, b102.Hash)
 	inOrder(
+		f.expectHead(99, anchor),
 		f.expectLogs(100, 100),
 		f.expectHead(100, a100), // logless: re-read after the fetch
 		f.expectHead(102, b102),
@@ -127,6 +131,7 @@ func TestRun_StaleTipDoesNotShortenLag(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	anchor := c.anchor(100)
 	a100, a101, a102 := c.next(100), c.next(101), c.next(102)
 	f := newFixture(t, a100, a101, a102)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -135,6 +140,7 @@ func TestRun_StaleTipDoesNotShortenLag(t *testing.T) {
 	staleB103 := head(103, common.HexToHash("0xb103"), common.HexToHash("0xb102"))
 	a103 := c.next(103) // canonical, on A102
 	inOrder(
+		f.expectHead(99, anchor),
 		f.expectLogs(100, 100),
 		f.expectHead(100, a100), // logless: re-read after the fetch
 		// B103's parent disagrees with retained A102; the node confirms A102 is canonical.
@@ -155,33 +161,33 @@ func TestRun_StaleTipDoesNotShortenLag(t *testing.T) {
 }
 
 // TestRun_ReorgAfterSingleHeadCatchupReachesBoundary pins the initial-gap
-// case: the first head (A105, lag 2) writes 100..103 with no received head at
-// 103, so the boundary hash is fetched and retained (and 100..102 metadata is
-// fetched by number); a reorg announced only by B106 then bridges the
-// unreceived 104 and reaches 103, where the written boundary is found
-// replaced. The fork point is verified against the persisted hashes (102 is
-// still canonical), the warehouse is rewound to 102, and 103..104 are
+// case: the first head (A105, lag 2) is bridged down to the resume anchor by
+// number — 104..100 fetched and retained canonical, the written boundary 103
+// among them — and writes 100..103; a reorg announced only by B106 then walks
+// the retained 105 and 104 and reaches 103, where the written boundary is
+// found replaced. The fork point is verified against the persisted hashes
+// (102 is still canonical), the warehouse is rewound to 102, and 103..104 are
 // rewritten from the canonical branch.
 func TestRun_ReorgAfterSingleHeadCatchupReachesBoundary(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	anchor := c.anchor(100)
+	c.extend(104)
 	f := newFixture(t, c.next(105))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	canonical102 := c.canonical(102)
-	a103 := head(103, common.HexToHash("0xa103"), canonical102.Hash)
 	b103 := head(103, common.HexToHash("0xb103"), canonical102.Hash)
 	b104 := head(104, common.HexToHash("0xb104"), b103.Hash)
 	b105 := head(105, common.HexToHash("0xb105"), b104.Hash)
 	b106 := c.orphanTip(106, b105.Hash)
-	calls := []*gomock.Call{f.expectHead(103, a103)}             // written boundary retained
-	calls = append(calls, f.expectMetadataHeads(c, 100, 102)...) // metadata first, then the logs
+	calls := []*gomock.Call{f.expectHead(99, anchor)}
+	calls = append(calls, f.expectBridgeHeads(c, 104, 100)...) // A105 bridged down to the anchor: 104..100 retained
 	calls = append(calls, f.expectLogs(100, 103))
-	calls = append(calls, f.expectRecheckHeads(c, 100, 102)...) // no logs: every block re-read after the fetch
+	calls = append(calls, f.expectRecheckHeads(c, 100, 103)...) // no logs: every block re-read after the fetch
 	calls = append(calls,
-		f.expectHead(103, a103),
 		f.expectHead(105, b105),         // retained A105 replaced
 		f.expectHead(104, b104),         // bridged (never received)
 		f.expectHead(103, b103),         // written boundary replaced: deep reorg
@@ -210,20 +216,21 @@ func TestRun_ReorgAboveBoundaryAfterCatchupIsAbsorbed(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	anchor := c.anchor(100)
+	c.extend(104)
 	f := newFixture(t, c.next(105))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	a103 := head(103, common.HexToHash("0xa103"), common.HexToHash("0xa102"))
+	a103 := c.canonical(103)
 	b104 := head(104, common.HexToHash("0xb104"), a103.Hash) // rejoins at the boundary
 	b105 := head(105, common.HexToHash("0xb105"), b104.Hash)
 	b106 := c.orphanTip(106, b105.Hash)
-	calls := []*gomock.Call{f.expectHead(103, a103)}
-	calls = append(calls, f.expectMetadataHeads(c, 100, 102)...)
+	calls := []*gomock.Call{f.expectHead(99, anchor)}
+	calls = append(calls, f.expectBridgeHeads(c, 104, 100)...) // A105 bridged down to the anchor
 	calls = append(calls, f.expectLogs(100, 103))
-	calls = append(calls, f.expectRecheckHeads(c, 100, 102)...)
+	calls = append(calls, f.expectRecheckHeads(c, 100, 103)...)
 	calls = append(calls,
-		f.expectHead(103, a103),
 		f.expectHead(105, b105),
 		f.expectHead(104, b104),
 		// 103 retained == b104's parent: rejoin, no fetch of 103.
@@ -247,6 +254,7 @@ func TestRun_QueuedDoubleReorgRejectsStaleHead(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	anchor := c.anchor(100)
 	a100, a101, a102 := c.next(100), c.next(101), c.next(102)
 	f := newFixture(t, a100, a101, a102)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -256,6 +264,7 @@ func TestRun_QueuedDoubleReorgRejectsStaleHead(t *testing.T) {
 	c102 := head(102, common.HexToHash("0xc102"), a101.Hash)
 	c103 := head(103, common.HexToHash("0xc103"), c102.Hash)
 	inOrder(
+		f.expectHead(99, anchor),
 		f.expectLogs(100, 100),
 		f.expectHead(100, a100), // logless: re-read after the fetch
 		// B103's parent matches neither retained A102 nor canonical C102: stale.
@@ -283,6 +292,7 @@ func TestRun_ReplacementBelowTipResetsConfirmationDepth(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	anchor := c.anchor(100)
 	a100, a101, a102 := c.next(100), c.next(101), c.next(102)
 	a103, a104 := c.next(103), c.next(104)
 	f := newFixture(t, a100, a101, a102)
@@ -295,6 +305,7 @@ func TestRun_ReplacementBelowTipResetsConfirmationDepth(t *testing.T) {
 	// With A104 still counted as tip this would be [101,102]; the replacement
 	// branch's tip B103 confirms 101 only.
 	inOrder(
+		f.expectHead(99, anchor),
 		f.expectLogs(100, 100), f.expectHead(100, a100),
 		f.expectLogs(101, 101), f.expectHead(101, b101), // 101 is re-read as the replacement it was written from
 	)
@@ -315,6 +326,7 @@ func TestRun_StaleHeadWalkReplacementResetsDepth(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	anchor := c.anchor(100)
 	a100, a101, a102 := c.next(100), c.next(101), c.next(102)
 	a103, a104 := c.next(103), c.next(104)
 	f := newFixture(t, a100, a101, a102)
@@ -325,6 +337,7 @@ func TestRun_StaleHeadWalkReplacementResetsDepth(t *testing.T) {
 	c102 := head(102, common.HexToHash("0xc102"), a101.Hash)
 	c103 := head(103, common.HexToHash("0xc103"), c102.Hash)
 	inOrder(
+		f.expectHead(99, anchor),
 		f.expectLogs(100, 100),
 		f.expectHead(100, a100), // logless: re-read after the fetch
 		// B103's parent matches neither A102 nor canonical C102: stale — but
@@ -402,12 +415,14 @@ func TestRun_DeepReorgBelowCoverageIsFatal(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	anchor := c.anchor(100)
 	a100 := c.next(100)
 	f := newFixture(t, a100)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	fork100 := c.fork(100)
+	fork100 := c.fork(100) // also descends from the canonical 99
 	inOrder(
+		f.expectHead(99, anchor), // retained as the bridge — but never written, so it cannot verify a fork point
 		f.expectLogs(100, 100),
 		f.expectHead(100, a100), // logless: re-read after the fetch
 		f.expectHead(100, fork100),
@@ -428,6 +443,7 @@ func TestRun_StaleHeadAtWrittenHeightIsIgnored(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	anchor := c.anchor(100)
 	f := newFixture(t, c.next(100))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -435,6 +451,7 @@ func TestRun_StaleHeadAtWrittenHeightIsIgnored(t *testing.T) {
 	h101 := c.next(101)
 	stale := head(100, common.HexToHash("0x5a1e"), common.HexToHash("0x99"))
 	inOrder(
+		f.expectHead(99, anchor),
 		f.expectLogs(100, 100),
 		f.expectHead(100, written100), // logless: re-read after the fetch
 		f.expectHead(100, written100), // node still holds what we wrote
@@ -455,12 +472,14 @@ func TestRun_ReconcileFetchErrorFails(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	anchor := c.anchor(100)
 	a100 := c.next(100)
 	f := newFixture(t, a100, c.next(101), c.next(102))
 
 	headErr := errors.New("rpc down")
 	b103 := head(103, common.HexToHash("0xb103"), common.HexToHash("0xb102"))
 	inOrder(
+		f.expectHead(99, anchor),
 		f.expectLogs(100, 100),
 		f.expectHead(100, a100), // logless: re-read after the fetch
 		f.client.EXPECT().HeadByNumber(gomock.Any(), uint64(102)).Return(nil, headErr),
@@ -474,16 +493,29 @@ func TestRun_ReconcileFetchErrorFails(t *testing.T) {
 }
 
 // The canonical-head fetches (written boundary, catch-up metadata, reconcile
-// walk) are all fatal on failure and name what they were fetching.
+// walk) are all fatal on failure and name what they were fetching. With the
+// resume anchor retained, the bridge walk normally covers every unreceived
+// height, so the boundary and metadata fetches by number only happen for a
+// gap the walk left: a stale head's walk stops at the first canonical block
+// that disagrees with it, and a canonical tip then rejoins there, leaving the
+// heights below unretained.
 
 func TestRun_BoundaryHeadFetchErrorFails(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
-	f := newFixture(t, c.next(105))
+	anchor := c.anchor(100)
+	stale105 := head(105, common.HexToHash("0xb105"), common.HexToHash("0xdead"))
+	c.extend(104)
+	f := newFixture(t, stale105, c.next(105))
 
 	headErr := errors.New("rpc down")
-	f.client.EXPECT().HeadByNumber(gomock.Any(), uint64(103)).Return(nil, headErr)
+	inOrder(
+		f.expectHead(99, anchor),
+		f.expectHead(104, c.canonical(104)), // the stale 105 is walked to 104, disagrees, and is dropped
+		// the canonical 105 rejoins at the retained 104; the boundary 103 was never bridged
+		f.client.EXPECT().HeadByNumber(gomock.Any(), uint64(103)).Return(nil, headErr),
+	)
 
 	err := f.run(context.Background(), ingestion.Config{ConfirmationBlocks: 2}, 100)
 	require.ErrorIs(t, err, headErr)
@@ -494,11 +526,17 @@ func TestRun_MetadataFetchErrorFails(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
-	f := newFixture(t, c.next(102))
+	anchor := c.anchor(100)
+	stale103 := head(103, common.HexToHash("0xb103"), common.HexToHash("0xdead"))
+	c.extend(102)
+	f := newFixture(t, stale103, c.next(103))
 
 	headErr := errors.New("rpc down")
 	// Metadata is read before the logs: the strict mock fails on any FilterLogs.
 	inOrder(
+		f.expectHead(99, anchor),
+		f.expectHead(102, c.canonical(102)), // the stale 103 is walked to 102, disagrees, and is dropped
+		// the canonical 103 rejoins at 102; 100..101 are fetched as batch metadata
 		f.expectHead(100, c.canonical(100)),
 		f.client.EXPECT().HeadByNumber(gomock.Any(), uint64(101)).Return(nil, headErr),
 	)
@@ -592,6 +630,57 @@ func TestRun_CatchupBoundPreemptsBridgeWalk(t *testing.T) {
 	require.Empty(t, f.sink.calls)
 }
 
+// TestRun_StartupStaleHighHeadCannotShortenLag pins the anchor's purpose on
+// an empty warehouse: a stale head above the start (B102, parent unknown to
+// the node) queued at subscribe time is walked down to the resume anchor
+// like any other — the node's 101 is not B102's parent, so B102 is dropped
+// before it can become the tip — and the canonical A100 alone leaves nothing
+// confirmed under lag 2. Block 100 is written exactly once, only after the
+// canonical 101 and 102 arrive; had B102 counted as tip, the write would have
+// happened first, before those heads were ever pushed.
+func TestRun_StartupStaleHighHeadCannotShortenLag(t *testing.T) {
+	t.Parallel()
+
+	c := &headChain{}
+	anchor := c.anchor(100)
+	staleB102 := head(102, common.HexToHash("0xb102"), common.HexToHash("0xdead"))
+	a100 := c.next(100)
+	f := newFixture(t, staleB102, a100)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a101, a102 := c.next(101), c.next(102)
+
+	canonicalTipPushed := false
+	inOrder(
+		f.expectHead(99, anchor), // nothing stored: the anchor is still fetched and retained as the bridge
+		// B102's walk: the bridge is present, so 101 is fetched; its hash is not
+		// B102's claimed parent, so the walk stops and B102 is stale. 100 is not
+		// fetched for it. The canonical tip arrives only now, after B102 was judged.
+		f.client.EXPECT().HeadByNumber(gomock.Any(), uint64(101)).DoAndReturn(
+			func(context.Context, uint64) (*chain.BlockHead, error) {
+				canonicalTipPushed = true
+				f.push(a101)
+				f.push(a102)
+				return a101, nil
+			}),
+		// A100 rejoins at the anchor without a fetch; tip 100 confirms nothing.
+		// A102 (through the retained 101) confirms 100.
+		f.expectLogs(100, 100),
+		f.expectHead(100, a100), // logless: re-read after the fetch
+	)
+	f.sink.steps = []func(uint64, uint64) error{func(from, to uint64) error {
+		require.True(t, canonicalTipPushed, "block 100 was confirmed before the canonical 101/102 arrived: the stale 102 acted as tip")
+		cancel()
+		return nil
+	}}
+
+	err := f.run(ctx, lagged, 100)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Empty(t, f.sink.rewinds)
+	require.Equal(t, [][2]uint64{{100, 100}}, f.sink.ranges(), "100 written once; 101 and 102 stay inside the lag")
+	require.Equal(t, []logstore.Block{blockOf(a100)}, f.sink.calls[0].Blocks, "100 is written from the canonical head")
+}
+
 // logAt builds a warehouse-shaped log for the block h, carrying its hash the
 // way a real eth_getLogs answer does.
 func logAt(h *chain.BlockHead) types.Log {
@@ -609,12 +698,14 @@ func TestRun_BatchRefetchedWhenLogsDisagreeWithHeaders(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	anchor := c.anchor(100)
 	stale100 := c.next(100) // the head the subscription delivered (the metadata of the first attempt)
 	f := newFixture(t, stale100)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	canonical100 := head(100, common.HexToHash("0xc100"), stale100.ParentHash) // what the node holds by the time logs are fetched
 	inOrder(
+		f.expectHead(99, anchor),
 		f.expectLogs(100, 100, logAt(canonical100)), // logs already come from the new block
 		// disagreement → retained 100 dropped; the batch starts over: 100 refetched canonical, then the logs again
 		f.expectHead(100, canonical100),
@@ -640,12 +731,14 @@ func TestRun_BatchRefetchedWhenLoglessBlockMovedDuringFetch(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	anchor := c.anchor(100)
 	a100 := c.next(100)
 	f := newFixture(t, a100)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	b100 := head(100, common.HexToHash("0xb100"), a100.ParentHash) // same parent: a one-block replacement
 	inOrder(
+		f.expectHead(99, anchor),
 		f.expectLogs(100, 100),  // branch A: no warehouse event, so the log fetch cannot vouch for 100
 		f.expectHead(100, b100), // the post-fetch re-read: 100 moved to B
 		// retained A100 dropped; the batch starts over with B100 as metadata
@@ -668,9 +761,11 @@ func TestRun_BatchGivesUpWhenChainKeepsMoving(t *testing.T) {
 	t.Parallel()
 
 	c := &headChain{}
+	anchor := c.anchor(100)
 	f := newFixture(t, c.next(100))
 	other := transferLog(100, 0)
 	other.BlockHash = common.HexToHash("0x07e4")
+	f.expectHead(99, anchor)
 	f.client.EXPECT().FilterLogs(gomock.Any(), logsFor(100, 100)).Return([]types.Log{other}, nil).Times(3)
 	f.client.EXPECT().HeadByNumber(gomock.Any(), uint64(100)).Return(c.canonical(100), nil).Times(2)
 

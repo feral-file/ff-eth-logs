@@ -4,6 +4,7 @@ package backfill
 
 import (
 	"context"
+	"encoding/json"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -53,6 +54,33 @@ func gapFill(from, to int64) []exportBlock {
 	return out
 }
 
+// writeManifest describes the test export the way the real one is described
+// from BigQuery + GCS: interval, per-partition rows, per-file size and MD5.
+func writeManifest(t *testing.T, dir string, first, last uint64, parts map[string]int64) {
+	t.Helper()
+	m := Manifest{Export: "test", Source: "test"}
+	m.Blocks.First, m.Blocks.Last, m.Blocks.Rows = first, last, int64(last-first+1)
+	m.Logs.Parts = parts
+	for _, n := range parts {
+		m.Logs.Rows += n
+	}
+	m.Files = map[string]ManifestFile{}
+	for _, pattern := range []string{filepath.Join(dir, "*", "*.parquet"), filepath.Join(dir, "*", "*", "*.parquet")} {
+		files, err := filepath.Glob(pattern)
+		require.NoError(t, err)
+		for _, path := range files {
+			size, sum, err := fileSizeAndMD5(path)
+			require.NoError(t, err)
+			rel, err := filepath.Rel(dir, path)
+			require.NoError(t, err)
+			m.Files[filepath.ToSlash(rel)] = ManifestFile{Size: size, MD5: sum}
+		}
+	}
+	raw, err := json.Marshal(m)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ManifestName), raw, 0o600))
+}
+
 func writeParquet[T any](t *testing.T, path string, rows []T) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
@@ -94,6 +122,10 @@ func TestLoaderEndToEnd(t *testing.T) {
 	writeParquet(t, filepath.Join(dir, "blocks", "blocks-000000000001.parquet"), gapFill(13, 1_000_000))
 
 	l := New(pool, dir)
+	// No manifest: finish refuses before looking at anything else.
+	require.ErrorContains(t, l.Finish(ctx), "manifest.json is required at the export root")
+	writeManifest(t, dir, 7, 1_000_005, map[string]int64{"000": 2, "001": 2})
+
 	require.NoError(t, l.Prepare(ctx))
 	var n int
 	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM pg_indexes WHERE tablename = 'eth_logs' AND indexname LIKE 'eth_logs_t%'`).Scan(&n))
@@ -104,7 +136,7 @@ func TestLoaderEndToEnd(t *testing.T) {
 	require.ErrorContains(t, err, "no blocks loaded")
 	require.NoError(t, l.Blocks(ctx))
 	err = l.Finish(ctx)
-	require.ErrorContains(t, err, "part 000 has 0 rows in the database, export has 2")
+	require.ErrorContains(t, err, "part 000 has 0 rows in the database, manifest.json says 2")
 	_, ok, err := logstore.NewFromPool(pool).Coverage(ctx)
 	require.NoError(t, err)
 	assert.False(t, ok, "cursor must stay unset until the load is verified")
@@ -117,6 +149,23 @@ func TestLoaderEndToEnd(t *testing.T) {
 	err = l.Finish(ctx)
 	require.ErrorContains(t, err, "export is missing logs/part=001 for blocks 1000000-1999999")
 	require.NoError(t, os.Rename(filepath.Join(dir, "part=001.aside"), filepath.Join(dir, "logs", "part=001")))
+
+	// A manifest that claims more logs than the export holds (a partial
+	// export copied with a manifest from the full one) is caught by the
+	// footer count before the database is consulted.
+	writeManifest(t, dir, 7, 1_000_005, map[string]int64{"000": 2, "001": 3})
+	require.ErrorContains(t, l.Finish(ctx), "part 001 files hold 2 rows, manifest.json says 3")
+	// A manifest for a different block interval than what was loaded.
+	writeManifest(t, dir, 7, 1_000_006, map[string]int64{"000": 2, "001": 2})
+	require.ErrorContains(t, l.Finish(ctx), "manifest.json says 1000000 rows for 7-1000006")
+	// A truncated or altered file is caught by its checksum.
+	writeManifest(t, dir, 7, 1_000_005, map[string]int64{"000": 2, "001": 2})
+	victim := filepath.Join(dir, "blocks", "blocks-000000000000.parquet")
+	original, err := os.ReadFile(victim)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(victim, original[:len(original)-1], 0o600))
+	require.ErrorContains(t, l.Finish(ctx), "differs from manifest.json")
+	require.NoError(t, os.WriteFile(victim, original, 0o600))
 
 	require.NoError(t, l.Finish(ctx))
 

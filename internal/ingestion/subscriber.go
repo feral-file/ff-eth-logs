@@ -151,15 +151,22 @@ func (s *Subscriber) Run(ctx context.Context, fromBlock uint64) error {
 	}
 }
 
-// verifyResumePoint checks the block the stream resumes after (next-1)
-// against the canonical chain before the first head is processed. Reason: a
-// reorg that replaced written blocks while the process was down leaves no
-// retained head to disagree with, so reconcile alone would append canonical
-// blocks on top of orphaned ones. Comparing the persisted hash with
-// eth_getBlockByNumber closes that gap; a mismatch runs the same
-// verified-ancestor rewind as a live deep reorg. When the hash matches (or
-// nothing is stored there — a fresh start_block), the canonical head is
-// retained so reconciliation has its bridge from the first head on.
+// verifyResumePoint anchors the stream on the block it resumes after
+// (next-1) before the first head is processed.
+//
+// Reason: a reorg that replaced written blocks while the process was down
+// leaves no retained head to disagree with, so reconcile alone would append
+// canonical blocks on top of orphaned ones. Comparing the persisted hash
+// with eth_getBlockByNumber closes that gap; a mismatch runs the same
+// verified-ancestor rewind as a live deep reorg. The canonical head at next-1
+// is then retained as the bridge — also when nothing is stored there (an
+// empty warehouse starting at start_block or the chain head): without a
+// bridge, reconcile has nothing to walk down to, so a queued stale head
+// whose parent is unknown would be retained unverified, become the tip, and
+// let the confirmation lag write the current tip as if it were confirmed.
+// With the anchor, every head must chain back to a canonical block before it
+// can raise the tip. Constraints: the walk from a far-ahead head is bounded
+// by the catch-up preflight, which runs before any reconciliation.
 func (s *Subscriber) verifyResumePoint(ctx context.Context, st *streamState) error {
 	if st.next == 0 {
 		return nil
@@ -169,14 +176,11 @@ func (s *Subscriber) verifyResumePoint(ctx context.Context, st *streamState) err
 	if err != nil {
 		return err
 	}
-	if !ok {
-		return nil
-	}
 	canonical, err := s.client.HeadByNumber(ctx, last)
 	if err != nil {
 		return fmt.Errorf("verify resume point %d: %w", last, err)
 	}
-	if canonical.Hash == stored {
+	if !ok || canonical.Hash == stored {
 		st.heads[last] = canonical
 		st.tip = last
 		return nil

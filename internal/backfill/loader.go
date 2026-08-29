@@ -10,8 +10,9 @@
 //	         into eth_logs so the heap is chain-ordered; skip directories whose
 //	         range already has rows
 //	blocks   COPY blocks-*.parquet into eth_blocks (skip if already populated)
-//	finish   verify every directory and block is loaded, recreate the indexes,
-//	         ANALYZE, publish coverage [oldest block, newest block]
+//	finish   verify the load against manifest.json (interval, per-partition
+//	         rows, file checksums), recreate the indexes, ANALYZE, publish
+//	         coverage [manifest first block, manifest last block]
 //
 // Sorting happens in Postgres (external sort, bounded by work_mem) because
 // the busiest 1 M-block partition holds ~60 M rows — far too many to sort in
@@ -66,11 +67,11 @@ func (l *Loader) Prepare(ctx context.Context) error {
 // the export and the API starts answering.
 //
 // Reason: the stages can be run individually and in any order, so the cursor
-// must not be derived from whatever happens to be in eth_blocks. Finish
-// re-derives the expected row count of every export directory from the
-// Parquet footers and compares it with the database, and checks eth_blocks
-// is one contiguous run, before it writes the cursor row. Until then the API
-// reports the warehouse as empty rather than serving a partial history.
+// must not be derived from whatever happens to be in eth_blocks — nor from
+// the files alone, which can only be compared with themselves. Finish checks
+// the database, the Parquet footers and the local files against the export
+// manifest (see Manifest) before it writes the cursor row. Until then the
+// API reports the warehouse as empty rather than serving a partial history.
 func (l *Loader) Finish(ctx context.Context) error {
 	cov, err := l.verifyLoaded(ctx)
 	if err != nil {
@@ -95,11 +96,16 @@ func (l *Loader) Finish(ctx context.Context) error {
 	return nil
 }
 
-// verifyLoaded checks that eth_blocks is one contiguous run and that every
-// logs/part=NNN directory's rows are in the database, returning the coverage
-// to publish. Row counts come from the Parquet footers, so the check is exact
-// without re-reading the data.
+// verifyLoaded checks the database and the local copy against the export
+// manifest and returns the coverage to publish: eth_blocks must be exactly
+// the manifest's contiguous interval, every partition the interval implies
+// must hold the manifest's row count in the database and in the Parquet
+// footers, and every file must match its recorded size and checksum.
 func (l *Loader) verifyLoaded(ctx context.Context) (logstore.Coverage, error) {
+	m, err := readManifest(l.dir)
+	if err != nil {
+		return logstore.Coverage{}, err
+	}
 	var lo, hi, n *int64
 	if err := l.pool.QueryRow(ctx, `SELECT MIN(number), MAX(number), COUNT(*) FROM eth_blocks`).Scan(&lo, &hi, &n); err != nil {
 		return logstore.Coverage{}, fmt.Errorf("read blocks: %w", err)
@@ -107,44 +113,48 @@ func (l *Loader) verifyLoaded(ctx context.Context) (logstore.Coverage, error) {
 	if lo == nil {
 		return logstore.Coverage{}, errors.New("no blocks loaded; run the blocks stage first")
 	}
-	if *n != *hi-*lo+1 {
-		return logstore.Coverage{}, fmt.Errorf("eth_blocks is not contiguous: %d rows for blocks %d-%d", *n, *lo, *hi)
+	if uint64(*lo) != m.Blocks.First || uint64(*hi) != m.Blocks.Last || *n != m.Blocks.Rows { //nolint:gosec // non-negative
+		return logstore.Coverage{}, fmt.Errorf("eth_blocks holds %d rows for blocks %d-%d, %s says %d rows for %d-%d",
+			*n, *lo, *hi, ManifestName, m.Blocks.Rows, m.Blocks.First, m.Blocks.Last)
 	}
-	// The expected directories come from the block interval, not from what
-	// happens to be on disk: the export writes one part=NNN per 1 M blocks up
-	// to the newest block (empty ones included, as a zero-row file), so a
-	// missing directory means an incomplete copy, not an empty partition.
-	for part := uint64(*lo) / logstore.PartitionBlocks; part <= uint64(*hi)/logstore.PartitionBlocks; part++ { //nolint:gosec // non-negative
-		dir := filepath.Join(l.dir, "logs", fmt.Sprintf("part=%03d", part))
-		if _, err := os.Stat(dir); err != nil {
-			return logstore.Coverage{}, fmt.Errorf("export is missing logs/part=%03d for blocks %d-%d; copy the full export",
-				part, part*logstore.PartitionBlocks, part*logstore.PartitionBlocks+logstore.PartitionBlocks-1)
-		}
-		if err := l.verifyPart(ctx, dir, uint64(*hi)); err != nil { //nolint:gosec // non-negative
+	for part := m.Blocks.First / logstore.PartitionBlocks; part <= m.Blocks.Last/logstore.PartitionBlocks; part++ {
+		if err := l.verifyPart(ctx, m, part); err != nil {
 			return logstore.Coverage{}, err
 		}
 	}
-	return logstore.Coverage{Start: uint64(*lo), Head: uint64(*hi)}, nil //nolint:gosec // non-negative
+	if err := m.verifyFiles(l.dir); err != nil {
+		return logstore.Coverage{}, err
+	}
+	return logstore.Coverage{Start: m.Blocks.First, Head: m.Blocks.Last}, nil
 }
 
-// verifyPart compares one export directory's footer row count with the rows
-// stored in its partition range, and checks no log sits above the newest block.
-func (l *Loader) verifyPart(ctx context.Context, dir string, newestBlock uint64) error {
-	part, err := strconv.ParseUint(strings.TrimPrefix(filepath.Base(dir), "part="), 10, 64)
+// verifyPart checks one partition against the manifest: the directory must
+// exist, its Parquet footers and the database must both hold the manifest's
+// row count, and no log may sit above the newest block.
+func (l *Loader) verifyPart(ctx context.Context, m *Manifest, part uint64) error {
+	want, err := m.partRows(part)
 	if err != nil {
-		return fmt.Errorf("part directory %s: %w", dir, err)
+		return err
+	}
+	dir := filepath.Join(l.dir, filepath.FromSlash(manifestPartDir(part)))
+	if _, err := os.Stat(dir); err != nil {
+		return fmt.Errorf("export is missing %s for blocks %d-%d; copy the full export",
+			manifestPartDir(part), part*logstore.PartitionBlocks, part*logstore.PartitionBlocks+logstore.PartitionBlocks-1)
 	}
 	files, err := parquetFiles(dir)
 	if err != nil {
 		return err
 	}
-	var expected int64
+	var footer int64
 	for _, file := range files {
 		n, err := parquetRowCount(file)
 		if err != nil {
 			return fmt.Errorf("%s: %w", file, err)
 		}
-		expected += n
+		footer += n
+	}
+	if footer != want {
+		return fmt.Errorf("part %03d files hold %d rows, %s says %d; the copy is incomplete", part, footer, ManifestName, want)
 	}
 	lo := part * logstore.PartitionBlocks
 	var got int64
@@ -153,11 +163,11 @@ func (l *Loader) verifyPart(ctx context.Context, dir string, newestBlock uint64)
 		int64(lo), int64(lo+logstore.PartitionBlocks-1)).Scan(&got, &maxBlock); err != nil { //nolint:gosec // fits int64
 		return fmt.Errorf("count partition %d: %w", part, err)
 	}
-	if got != expected {
-		return fmt.Errorf("part %03d has %d rows in the database, export has %d; run the logs stage", part, got, expected)
+	if got != want {
+		return fmt.Errorf("part %03d has %d rows in the database, %s says %d; run the logs stage", part, got, ManifestName, want)
 	}
-	if maxBlock != nil && uint64(*maxBlock) > newestBlock { //nolint:gosec // non-negative
-		return fmt.Errorf("part %03d has logs at block %d above the newest loaded block %d", part, *maxBlock, newestBlock)
+	if maxBlock != nil && uint64(*maxBlock) > m.Blocks.Last { //nolint:gosec // non-negative
+		return fmt.Errorf("part %03d has logs at block %d above the manifest's newest block %d", part, *maxBlock, m.Blocks.Last)
 	}
 	return nil
 }
