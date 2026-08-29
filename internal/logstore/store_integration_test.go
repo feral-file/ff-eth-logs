@@ -321,3 +321,31 @@ func TestRewindToGenesisBoundary(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, found)
 }
+
+// TestAbandonedReadsDoNotChurnPool pins the rollback-with-own-context rule:
+// a Read whose request context is already cancelled when it unwinds must
+// still hand its connection back clean, so repeated client timeouts do not
+// force the pool to open new connections.
+func TestAbandonedReadsDoNotChurnPool(t *testing.T) {
+	ctx := context.Background()
+	pool := testdb.Open(t)
+	s := NewFromPool(pool)
+	require.NoError(t, s.WriteRange(ctx, 1, 3, blocksFor(1, 3), nil))
+	// Warm one connection.
+	require.NoError(t, s.Read(ctx, func(v View) error { _, _, err := v.Coverage(ctx); return err }))
+	before := pool.Stat().NewConnsCount()
+
+	for i := 0; i < 5; i++ {
+		rctx, cancel := context.WithCancel(ctx)
+		err := s.Read(rctx, func(v View) error {
+			_, _, err := v.Coverage(rctx)
+			require.NoError(t, err)
+			cancel() // the client goes away mid-request
+			_, err = v.FilterLogs(rctx, Query{FromBlock: 1, ToBlock: 3}, 0)
+			return err
+		})
+		require.Error(t, err)
+	}
+	require.NoError(t, s.Read(ctx, func(v View) error { _, _, err := v.Coverage(ctx); return err }))
+	assert.Equal(t, before, pool.Stat().NewConnsCount(), "no connection was discarded and reopened")
+}

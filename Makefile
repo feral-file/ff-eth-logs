@@ -127,14 +127,19 @@ imports: ## Format imports
 	@goimports -w -local "$(MODULE)" $$(find . -name '*.go' -not -path './internal/mocks/*')
 	@echo "$(COLOR_GREEN)✓ Imports formatted$(COLOR_RESET)"
 
+# Every Go file in the repository, discovered explicitly so the formatter
+# targets are independent of gofmt's directory handling.
+GO_FILES := $(shell find . -name '*.go' -not -path './.git/*')
+
 fmt: ## Apply gofmt -s formatting (matches CI go fmt check)
-	@gofmt -s -w .
+	@gofmt -s -w $(GO_FILES)
 	@echo "$(COLOR_GREEN)✓ Go code formatted$(COLOR_RESET)"
 
 fmt-check: ## Verify gofmt -s formatting (matches CI go fmt check)
-	@if [ "$$(gofmt -s -l . | wc -l | tr -d ' ')" -gt 0 ]; then \
-		echo "$(COLOR_YELLOW)Code is not formatted. Run 'make fmt' or 'gofmt -s -w .'$(COLOR_RESET)"; \
-		gofmt -s -l .; \
+	@set -e; unformatted="$$(gofmt -s -l $(GO_FILES))"; \
+	if [ -n "$$unformatted" ]; then \
+		echo "$(COLOR_YELLOW)Code is not formatted. Run 'make fmt'$(COLOR_RESET)"; \
+		echo "$$unformatted"; \
 		exit 1; \
 	fi
 	@echo "$(COLOR_GREEN)✓ gofmt check passed$(COLOR_RESET)"

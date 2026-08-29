@@ -6,7 +6,10 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,10 +56,21 @@ type DatabaseConfig struct {
 	MaxConns int    `mapstructure:"max_conns"`
 }
 
-// DSN renders the pgx connection string.
+// DSN renders the pgx connection string as a URL, so a password or user
+// containing spaces, quotes, backslashes, '@' or '/' is escaped rather than
+// re-parsed as keyword/value syntax.
 func (d DatabaseConfig) DSN() string {
-	return fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s pool_max_conns=%d",
-		d.Host, d.Port, d.User, d.Password, d.DBName, d.SSLMode, d.MaxConns)
+	u := url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(d.User, d.Password),
+		Host:   net.JoinHostPort(d.Host, strconv.Itoa(d.Port)),
+		Path:   "/" + d.DBName,
+	}
+	q := url.Values{}
+	q.Set("sslmode", d.SSLMode)
+	q.Set("pool_max_conns", strconv.Itoa(d.MaxConns))
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 // EthereumConfig drives tail ingestion. Keys and defaults mirror the

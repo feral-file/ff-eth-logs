@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -63,6 +64,21 @@ func (s *Store) Pool() *pgxpool.Pool { return s.pool }
 // Close releases the pool.
 func (s *Store) Close() { s.pool.Close() }
 
+// rollback aborts tx with its own short context. Reason: the request
+// context is usually the reason the transaction is being abandoned (query
+// timeout, client gone), and a rollback sent on a canceled context cannot
+// be delivered, so the pool has to discard the connection instead of
+// reusing it — repeated timeouts would churn the pool. A committed tx
+// returns ErrTxClosed here, which is the expected no-op.
+func rollback(tx pgx.Tx) {
+	ctx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
+	defer cancel()
+	_ = tx.Rollback(ctx)
+}
+
+// rollbackTimeout bounds the cleanup rollback of an abandoned transaction.
+const rollbackTimeout = 5 * time.Second
+
 // querier is the subset of pgx.Tx / pgxpool.Pool the cursor reads use.
 type querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
@@ -120,7 +136,7 @@ func (s *Store) WriteRange(ctx context.Context, from, to uint64, blocks []Block,
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer rollback(tx)
 
 	cov, ok, err := readCoverage(ctx, tx, true)
 	if err != nil {
@@ -212,7 +228,7 @@ func (s *Store) Rewind(ctx context.Context, to uint64) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer rollback(tx)
 	cov, ok, err := readCoverage(ctx, tx, true)
 	if err != nil {
 		return err
@@ -254,7 +270,7 @@ func (s *Store) SetCoverage(ctx context.Context, cov Coverage) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer rollback(tx)
 	if err := setCoverage(ctx, tx, cov); err != nil {
 		return err
 	}

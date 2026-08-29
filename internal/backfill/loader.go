@@ -248,7 +248,7 @@ func (l *Loader) loadPart(ctx context.Context, dir string) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer rollback(tx)
 	if _, err := tx.Exec(ctx, `CREATE TEMP TABLE staging_logs (LIKE eth_logs) ON COMMIT DROP`); err != nil {
 		return fmt.Errorf("create staging: %w", err)
 	}
@@ -271,8 +271,20 @@ func (l *Loader) loadPart(ctx context.Context, dir string) error {
 	return nil
 }
 
-// Blocks loads blocks/blocks-*.parquet into eth_blocks.
+// Blocks loads blocks/blocks-*.parquet into eth_blocks, keeping only the
+// manifest's interval.
+//
+// Reason: the blocks export is taken from the live blocks table, which can
+// have advanced past the logs extract between the two steps of the export
+// script. Loading those newer blocks would let a manifest that adopted them
+// publish coverage for blocks whose logs were never extracted; trimming to
+// the manifest interval here makes the manifest — not the longer blocks
+// export — the authority on what is covered.
 func (l *Loader) Blocks(ctx context.Context) error {
+	m, err := readManifest(l.dir)
+	if err != nil {
+		return err
+	}
 	files, err := parquetFiles(filepath.Join(l.dir, "blocks"))
 	if err != nil {
 		return err
@@ -290,10 +302,14 @@ func (l *Loader) Blocks(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer rollback(tx)
 	var rows int64
+	inInterval := func(_ map[string]int, r parquet.Row, c map[string]int) bool {
+		n := r[c["number"]].Int64()
+		return n >= 0 && uint64(n) >= m.Blocks.First && uint64(n) <= m.Blocks.Last //nolint:gosec // checked non-negative
+	}
 	for i, file := range files {
-		n, err := copyParquet(ctx, tx, file, "eth_blocks", blockColumns, blockRow)
+		n, err := copyParquetWhere(ctx, tx, file, "eth_blocks", blockColumns, blockRow, inInterval)
 		if err != nil {
 			return fmt.Errorf("load %s: %w", file, err)
 		}
@@ -307,6 +323,14 @@ func (l *Loader) Blocks(ctx context.Context) error {
 	}
 	logger.InfoCtx(ctx, "Blocks loaded", zap.Int("files", len(files)), zap.Int64("rows", rows), zap.Duration("took", time.Since(start)))
 	return nil
+}
+
+// rollback aborts tx with its own short context (see logstore.rollback for
+// why the request context must not be used).
+func rollback(tx pgx.Tx) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = tx.Rollback(ctx)
 }
 
 func parquetFiles(dir string) ([]string, error) {
@@ -360,8 +384,16 @@ func bytesOrEmpty(v parquet.Value) []byte {
 	return v.ByteArray()
 }
 
+// rowFilter decides whether one Parquet row is copied.
+type rowFilter func(cols map[string]int, row parquet.Row, c map[string]int) bool
+
 // copyParquet streams one Parquet file into table via COPY.
 func copyParquet(ctx context.Context, tx pgx.Tx, path, table string, columns []string, mapRow rowMapper) (int64, error) {
+	return copyParquetWhere(ctx, tx, path, table, columns, mapRow, nil)
+}
+
+// copyParquetWhere is copyParquet with an optional row filter.
+func copyParquetWhere(ctx context.Context, tx pgx.Tx, path, table string, columns []string, mapRow rowMapper, keep rowFilter) (int64, error) {
 	f, err := os.Open(path) //nolint:gosec // operator-supplied export directory
 	if err != nil {
 		return 0, err
@@ -382,7 +414,7 @@ func copyParquet(ctx context.Context, tx pgx.Tx, path, table string, columns []s
 	}
 	var total int64
 	for _, rg := range pf.RowGroups() {
-		src := &parquetSource{ctx: ctx, rows: rg.Rows(), cols: cols, mapRow: mapRow, buf: make([]parquet.Row, 1024)}
+		src := &parquetSource{ctx: ctx, rows: rg.Rows(), cols: cols, mapRow: mapRow, keep: keep, buf: make([]parquet.Row, 1024)}
 		n, err := tx.CopyFrom(ctx, pgx.Identifier{table}, columns, src)
 		_ = src.rows.Close()
 		if err != nil {
@@ -399,12 +431,26 @@ type parquetSource struct {
 	rows   parquet.Rows
 	cols   map[string]int
 	mapRow rowMapper
+	keep   rowFilter
 	buf    []parquet.Row
 	n, i   int
 	err    error
 }
 
 func (s *parquetSource) Next() bool {
+	for {
+		if !s.advance() {
+			return false
+		}
+		if s.keep == nil || s.keep(s.cols, s.buf[s.i], s.cols) {
+			return true
+		}
+	}
+}
+
+// advance moves to the next buffered row, refilling the buffer from the
+// row group when it is exhausted.
+func (s *parquetSource) advance() bool {
 	if s.err != nil {
 		return false
 	}

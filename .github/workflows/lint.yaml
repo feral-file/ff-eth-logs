@@ -61,10 +61,15 @@ jobs:
           working-directory: ./
 
       - name: Run go fmt check
+        # Explicit file list, and gofmt's own exit status is preserved (a
+        # syntax error must fail the check, not be masked by a pipe).
         run: |
-          if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
-            echo "Code is not formatted. Please run 'gofmt -s -w .'"
-            gofmt -s -l .
+          set -euo pipefail
+          files=$(git ls-files '*.go')
+          unformatted=$(gofmt -s -l $files)
+          if [ -n "$unformatted" ]; then
+            echo "Code is not formatted. Please run 'make fmt'"
+            echo "$unformatted"
             exit 1
           fi
 

@@ -120,10 +120,14 @@ func TestLoaderEndToEnd(t *testing.T) {
 	}
 	writeParquet(t, filepath.Join(dir, "blocks", "blocks-000000000000.parquet"), blocks)
 	writeParquet(t, filepath.Join(dir, "blocks", "blocks-000000000001.parquet"), gapFill(13, 1_000_000))
+	// The live blocks table advanced after the logs extract: the export holds
+	// blocks above the manifest's end. They must not be loaded.
+	writeParquet(t, filepath.Join(dir, "blocks", "blocks-000000000002.parquet"), gapFill(1_000_006, 1_000_010))
 
 	l := New(pool, dir)
-	// No manifest: finish refuses before looking at anything else.
+	// No manifest: finish and the blocks stage refuse before touching anything.
 	require.ErrorContains(t, l.Finish(ctx), "manifest.json is required at the export root")
+	require.ErrorContains(t, l.Blocks(ctx), "manifest.json is required at the export root")
 	writeManifest(t, dir, 7, 1_000_005, map[string]int64{"000": 2, "001": 2})
 
 	require.NoError(t, l.Prepare(ctx))
@@ -174,6 +178,9 @@ func TestLoaderEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, ok)
 	assert.Equal(t, logstore.Coverage{Start: 7, Head: 1_000_005}, cov)
+	var above int
+	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM eth_blocks WHERE number > 1000005`).Scan(&above))
+	assert.Equal(t, 0, above, "blocks above the manifest end are trimmed at load, so coverage cannot widen past the logs extract")
 
 	logs, err := store.FilterLogs(ctx, logstore.Query{FromBlock: 0, ToBlock: 2_000_000}, 0)
 	require.NoError(t, err)

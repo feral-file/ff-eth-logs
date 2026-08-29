@@ -51,7 +51,7 @@ func (s *Store) Read(ctx context.Context, fn func(View) error) error {
 	if err != nil {
 		return fmt.Errorf("begin read snapshot: %w", err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer rollback(tx)
 	if err := fn(snapshot{q: tx}); err != nil {
 		return err
 	}

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -27,7 +28,21 @@ func TestLoadDefaultsAndEnvOverride(t *testing.T) {
 	assert.Equal(t, 100_000, cfg.RPC.MaxResults)
 	assert.Equal(t, 60*time.Second, cfg.RPC.QueryTimeout)
 	assert.True(t, cfg.Ethereum.IngestionEnabled)
-	assert.Contains(t, cfg.Database.DSN(), "host=dbhost port=5432 user=postgres")
+	assert.Equal(t, "postgres://postgres:@dbhost:5432/ff_eth_logs?pool_max_conns=16&sslmode=disable", cfg.Database.DSN())
+}
+
+// TestDSNEscapesCredentials pins that generated passwords with characters
+// that are special in URLs or keyword/value syntax survive the round trip.
+func TestDSNEscapesCredentials(t *testing.T) {
+	d := DatabaseConfig{Host: "db.internal", Port: 5433, User: "ff user", Password: `p@ss w/rd'"\#?&`, DBName: "ff_eth_logs", SSLMode: "require", MaxConns: 8} //nolint:gosec // deliberately awkward test value, not a credential
+	cfg, err := pgxpool.ParseConfig(d.DSN())
+	require.NoError(t, err)
+	assert.Equal(t, "ff user", cfg.ConnConfig.User)
+	assert.Equal(t, `p@ss w/rd'"\#?&`, cfg.ConnConfig.Password)
+	assert.Equal(t, "db.internal", cfg.ConnConfig.Host)
+	assert.Equal(t, uint16(5433), cfg.ConnConfig.Port)
+	assert.Equal(t, "ff_eth_logs", cfg.ConnConfig.Database)
+	assert.Equal(t, int32(8), cfg.MaxConns)
 }
 
 func TestValidate(t *testing.T) {
