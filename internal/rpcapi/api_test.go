@@ -70,11 +70,16 @@ func TestGetLogs_ResolvesRangeAndTags(t *testing.T) {
 	assert.Equal(t, uint64(100), wh.gotQ.FromBlock)
 	assert.Equal(t, uint64(100), wh.gotQ.ToBlock)
 
-	for _, tag := range []rpc.BlockNumber{rpc.LatestBlockNumber, rpc.SafeBlockNumber, rpc.FinalizedBlockNumber} {
+	_, err = api.GetLogs(ctx, transferCrit(rpc.EarliestBlockNumber.Int64(), rpc.LatestBlockNumber.Int64()))
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), wh.gotQ.FromBlock)
+	assert.Equal(t, uint64(100), wh.gotQ.ToBlock)
+	// safe / finalized would promise a finality the head does not have.
+	var scope *ScopeError
+	for _, tag := range []rpc.BlockNumber{rpc.SafeBlockNumber, rpc.FinalizedBlockNumber} {
 		_, err = api.GetLogs(ctx, transferCrit(rpc.EarliestBlockNumber.Int64(), tag.Int64()))
-		require.NoError(t, err, tag)
-		assert.Equal(t, uint64(0), wh.gotQ.FromBlock)
-		assert.Equal(t, uint64(100), wh.gotQ.ToBlock)
+		require.ErrorAs(t, err, &scope, tag)
+		assert.Contains(t, err.Error(), "safe and finalized block tags are not served")
 	}
 }
 

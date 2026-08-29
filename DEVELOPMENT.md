@@ -67,6 +67,7 @@ The binary supports **dual configuration**: a YAML file and `FF_ETH_LOGS_*` envi
 | `ethereum.start_block` | `0` | Where an empty warehouse starts; refused once a cursor exists (use `rewind` and unset it) |
 | `ethereum.confirmation_blocks` | `2` | Blocks are written this far behind the tip; must be below `max_catchup_blocks` |
 | `ethereum.max_catchup_blocks` | `50000` | Largest cursor-to-tip gap walked on start; `0` = unbounded |
+| `ethereum.head_timeout` | `5m` | Exit (`newHeads subscription is silent`) when no head arrives for this long while waiting; never during a catch-up. `0` disables |
 | `ethereum.getlogs_span_cap` | `10000` | Provider `eth_getLogs` block-range cap (`toBlock - fromBlock`); `0` = discover by rejection |
 | `rpc.max_results` | `100000` | Above this, `eth_getLogs` returns `query returned more than N results`; `0` = unlimited |
 | `rpc.query_timeout` | `60s` | Bounds one `eth_getLogs` database query |

@@ -149,7 +149,7 @@ func runIngestion(ctx context.Context, cfg *config.Config, store *logstore.Store
 	}
 	defer client.Close()
 	return ingestion.Run(ctx, ingestion.RunConfig{
-		Config:     ingestion.Config{MaxCatchupBlocks: cfg.Ethereum.MaxCatchupBlocks, ConfirmationBlocks: cfg.Ethereum.ConfirmationBlocks},
+		Config:     ingestion.Config{MaxCatchupBlocks: cfg.Ethereum.MaxCatchupBlocks, ConfirmationBlocks: cfg.Ethereum.ConfirmationBlocks, HeadTimeout: cfg.Ethereum.HeadTimeout},
 		ChainID:    cfg.Ethereum.ChainID,
 		StartBlock: cfg.Ethereum.StartBlock,
 		SpanCap:    cfg.Ethereum.GetLogsSpanCap,

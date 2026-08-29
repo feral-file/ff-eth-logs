@@ -44,7 +44,8 @@ Resolution follows geth's `GetLogs` / `Filter.Logs` order of checks, then bounds
 | `blockHash` known but outside the covered interval (rows left by an interrupted backfill, or above a rewound head) | `-32000 out of warehouse scope: block N (0x…) is outside the warehouse coverage S-H` |
 | `blockHash` unknown | `-32000 unknown block` |
 | `fromBlock` / `toBlock` omitted | `latest` |
-| `latest`, `safe`, `finalized` | the warehouse head (every stored block is at least `confirmation_blocks` deep, which is shallower than a node's `safe` / `finalized`) |
+| `latest` | the warehouse head `H` |
+| `safe`, `finalized` | `-32000 out of warehouse scope: safe and finalized block tags are not served (the warehouse head is only confirmation_blocks deep); ask a node` — the head is ~2 blocks deep, a node's safe/finalized boundary is deeper, so the tags would promise a finality the data does not have |
 | `earliest` | block 0 |
 | `pending` in either bound | `-32000 pending logs are not supported` |
 | both bounds explicit numbers and `fromBlock > toBlock` | `-32000 invalid block range params` |

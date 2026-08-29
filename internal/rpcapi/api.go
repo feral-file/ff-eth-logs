@@ -235,14 +235,17 @@ func resolveRange(ctx context.Context, v logstore.View, crit FilterCriteria, cov
 	return q, from > to, nil
 }
 
-// resolveSpecial maps geth's block tags onto the warehouse: latest, safe and
-// finalized all resolve to the head (every stored block is at least
-// confirmation_blocks deep, which is shallower than "safe"/"finalized" on a
-// node — documented in docs/api_design.md); earliest is 0.
+// resolveSpecial maps geth's block tags onto the warehouse: latest is the
+// head; earliest is 0; safe and finalized are refused, because the head is
+// only confirmation_blocks deep — shallower than a node's safe/finalized
+// boundary — and answering them from it would attach a finality guarantee
+// the data does not have (the caller falls back to a node).
 func resolveSpecial(number int64, head uint64) (uint64, error) {
 	switch number {
-	case rpc.LatestBlockNumber.Int64(), rpc.SafeBlockNumber.Int64(), rpc.FinalizedBlockNumber.Int64():
+	case rpc.LatestBlockNumber.Int64():
 		return head, nil
+	case rpc.SafeBlockNumber.Int64(), rpc.FinalizedBlockNumber.Int64():
+		return 0, &ScopeError{Reason: "safe and finalized block tags are not served (the warehouse head is only confirmation_blocks deep); ask a node"}
 	case rpc.EarliestBlockNumber.Int64():
 		return 0, nil
 	default:

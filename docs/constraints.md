@@ -33,6 +33,7 @@ Hard and soft constraints for **FF Eth Logs**. Treat these as guardrails when ch
 
 ## 4. Operational constraints
 
+- **Silence is a failure** — a `newHeads` subscription that delivers nothing for `ethereum.head_timeout` (5 m; a block is due every 12 s) ends the process with `newHeads subscription is silent`, because a half-open socket produces neither heads nor an error and `/health` would keep answering 200 from the database. The watchdog is armed only while waiting for a head, so a long catch-up does not trip it.
 - **Mainnet only, enforced** — `ethereum.chain_id` must be `1` (`config.Validate`: the schema carries no chain identity, so another chain's data could later be served as mainnet), and ingestion calls `eth_chainId` before reading the cursor and refuses to start unless the provider reports it (`provider chain id X does not match configured ethereum.chain_id Y`).
 - **Single process** — `serve` runs the API and tail ingestion together; either failing stops the other (an API alone would serve a head that silently stops moving). An API-only replica is possible with `ethereum.ingestion_enabled=false` but shares the same database.
 - **Ingestion failures are fatal** — subscription errors, fetch failures after the retry budget (5 s → 30 s backoff, 5 min total), sink failures and a too-large catch-up all end the process. There is no in-process reconnect; the supervisor restarts it and it resumes from the cursor.

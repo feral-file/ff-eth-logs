@@ -154,6 +154,7 @@ The indexer keeps working during the rebuild only if its routing client falls ba
 | info | `Ethereum shallow reorg absorbed within confirmation lag` | `height`, `old`, `new` — absorbed, no action |
 | **error** | `ethereum reorg deeper than confirmation lag: a written block was replaced` | section 2 |
 | warn | `retryable ethereum error encountered` | `operation`, `url` (scheme + host) — provider trouble under retry |
+| error (exit) | `newHeads subscription is silent: no head in 5m0s (last written block N); restarting to reconnect` | The socket went half-open; the supervisor restart reconnects. Repeated occurrences mean the provider's WebSocket is unreliable |
 | info | `Log pagination walk progress` | every 250 windows of a long walk |
 | **error** | `ff-eth-logs stopped with error` | The exit line; the wrapped error says why (`new heads subscription error`, `fetch ingestion logs for blocks A-B`, `write blocks A-B`, catch-up bound) |
 | info | `JSON-RPC server listening` | `addr` |

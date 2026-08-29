@@ -954,3 +954,38 @@ func TestRun_MidBatchDiscontinuityRefetches(t *testing.T) {
 		require.Equal(t, c.canonical(100+uint64(i)).Hash, b.Hash)
 	}
 }
+
+// TestRun_SilentSubscriptionIsFatal pins the watchdog: a subscription that
+// delivers neither heads nor an error (a half-open socket) ends the run
+// with ErrHeadsSilent after HeadTimeout, so the supervisor reconnects; and a
+// head arriving in time re-arms it.
+func TestRun_SilentSubscriptionIsFatal(t *testing.T) {
+	t.Parallel()
+
+	c := &headChain{}
+	anchor := c.anchor(100)
+	f := newFixture(t)
+	f.sink.seedStored(c, 90, 99)
+	f.expectHead(99, anchor)
+
+	err := f.run(context.Background(), ingestion.Config{HeadTimeout: 60 * time.Millisecond}, 100)
+	require.ErrorIs(t, err, ingestion.ErrHeadsSilent)
+	require.Contains(t, err.Error(), "no head in 60ms (last written block 99)")
+	require.Empty(t, f.sink.calls)
+
+	// A head within the timeout keeps the run alive past the first period.
+	c2 := &headChain{}
+	anchor2 := c2.anchor(100)
+	f2 := newFixture(t, c2.next(100))
+	f2.sink.seedStored(c2, 90, 99)
+	f2.expectHead(99, anchor2)
+	f2.expectLogs(100, 100)
+	f2.expectHead(100, c2.canonical(100)) // logless re-read
+	f2.sink.steps = []func(uint64, uint64) error{func(uint64, uint64) error {
+		time.Sleep(90 * time.Millisecond) // longer than the timeout: the watchdog is stopped during a write
+		return nil
+	}}
+	err = f2.run(context.Background(), ingestion.Config{HeadTimeout: 60 * time.Millisecond}, 100)
+	require.ErrorIs(t, err, ingestion.ErrHeadsSilent, "silence after the write is still caught")
+	require.Equal(t, [][2]uint64{{100, 100}}, f2.sink.ranges(), "the write itself was not interrupted by the watchdog")
+}

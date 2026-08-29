@@ -31,6 +31,7 @@ ethereum:
   confirmation_blocks: 2 # blocks are written this far behind the tip; the reorg strategy
   max_catchup_blocks: 50000
   getlogs_span_cap: 10000 # provider eth_getLogs block-range cap (Chainstack 10100, Infura 10000)
+  head_timeout: 5m       # exit when no newHeads notification arrives for this long (half-open socket); 0 disables
 
 rpc:
   max_results: 100000    # eth_getLogs responses above this return "query returned more than N results"

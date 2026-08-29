@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -48,7 +49,19 @@ type Config struct {
 	// writes: a block is fetched only once head - ConfirmationBlocks reaches
 	// it. 0 writes the tip immediately.
 	ConfirmationBlocks uint64
+	// HeadTimeout is how long the loop waits for a newHeads notification
+	// before treating the subscription as dead. A half-open WebSocket
+	// delivers neither heads nor an error, and /health stays 200 as long as
+	// the database answers, so without this the warehouse would go stale
+	// silently. Measured only while waiting for a head, never during a
+	// catch-up. 0 disables the watchdog.
+	HeadTimeout time.Duration
 }
+
+// ErrHeadsSilent is returned when no head arrived within Config.HeadTimeout.
+// It is fatal like every other subscription failure: the process exits and
+// the supervisor restarts it with a fresh connection.
+var ErrHeadsSilent = errors.New("newHeads subscription is silent")
 
 // Sink is the warehouse as ingestion sees it. WriteRange must be atomic:
 // blocks and logs for [from, to] plus the cursor move to `to`, or nothing.
@@ -139,26 +152,61 @@ func (s *Subscriber) Run(ctx context.Context, fromBlock uint64) error {
 	if err := s.verifyResumePoint(ctx, &state); err != nil {
 		return err
 	}
+	// The watchdog is armed only while waiting here; a catch-up runs inside
+	// ingestRange with the timer stopped, so a long gap fill never trips it.
+	var silent <-chan time.Time
+	var watchdog *time.Timer
+	if s.cfg.HeadTimeout > 0 {
+		watchdog = time.NewTimer(s.cfg.HeadTimeout)
+		defer watchdog.Stop()
+		silent = watchdog.C
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case err := <-sub.Err():
 			return fmt.Errorf("new heads subscription error: %w", err)
+		case <-silent:
+			return fmt.Errorf("%w: no head in %s (last written block %d); restarting to reconnect", ErrHeadsSilent, s.cfg.HeadTimeout, state.next-1)
 		case head := <-heads:
+			stopTimer(watchdog)
 			from, to, ok, err := s.planRange(ctx, &state, append([]*chain.BlockHead{head}, drainHeads(heads)...))
 			if err != nil {
 				return err
 			}
 			if !ok {
+				resetTimer(watchdog, s.cfg.HeadTimeout)
 				continue
 			}
 			if err := s.ingestRange(ctx, &state, from, to); errors.Is(err, errReplan) {
+				resetTimer(watchdog, s.cfg.HeadTimeout)
 				continue // the position moved (reorg recovery); the next head replans
 			} else if err != nil {
 				return err
 			}
 			state.advance(to)
+		}
+		resetTimer(watchdog, s.cfg.HeadTimeout)
+	}
+}
+
+// resetTimer re-arms a stopped watchdog.
+func resetTimer(t *time.Timer, d time.Duration) {
+	if t != nil {
+		t.Reset(d)
+	}
+}
+
+// stopTimer stops t and drains a fired-but-unread tick so Reset arms cleanly.
+func stopTimer(t *time.Timer) {
+	if t == nil {
+		return
+	}
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
 		}
 	}
 }

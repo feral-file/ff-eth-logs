@@ -25,6 +25,7 @@ func TestLoadDefaultsAndEnvOverride(t *testing.T) {
 	assert.Equal(t, uint64(0), cfg.Ethereum.MaxCatchupBlocks)
 	assert.Equal(t, uint64(2), cfg.Ethereum.ConfirmationBlocks)
 	assert.Equal(t, uint64(10_000), cfg.Ethereum.GetLogsSpanCap)
+	assert.Equal(t, 5*time.Minute, cfg.Ethereum.HeadTimeout)
 	assert.Equal(t, 100_000, cfg.RPC.MaxResults)
 	assert.Equal(t, 60*time.Second, cfg.RPC.QueryTimeout)
 	assert.True(t, cfg.Ethereum.IngestionEnabled)
