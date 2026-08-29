@@ -165,6 +165,8 @@ The indexer keeps working during the rebuild only if its routing client falls ba
 
 ## 7. Deployment via ff-deploy
 
+**PostgreSQL needs `shm_size`.** Parallel query workers pass data through `/dev/shm`; with Docker's default 64 MB a broad `eth_getLogs` (tens of thousands of matches) fails with `could not resize shared memory segment … No space left on device` (SQLSTATE 53100). Set `shm_size: "1g"` on the PostgreSQL service in the compose file (the dev compose does), or set `dynamic_shared_memory_type = mmap` / `max_parallel_workers_per_gather = 0` if the host cannot provide it.
+
 The service is deployed by ff-deploy (push the config and image bump to `main` in one commit):
 
 - **Image** `${IMAGE}` (built from `tools/docker/Dockerfile`); the container starts the binary with `-config /app/config.yaml`.

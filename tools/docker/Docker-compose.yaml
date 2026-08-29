@@ -7,6 +7,10 @@ services:
   postgres:
     image: postgres:18-alpine
     container_name: ff-eth-logs-postgres
+    # Parallel query workers exchange data through /dev/shm; Docker's 64 MB
+    # default makes a broad eth_getLogs fail with "could not resize shared
+    # memory segment … No space left on device" (seen on the first backfill).
+    shm_size: "1g"
     environment:
       POSTGRES_USER: ${FF_ETH_LOGS_DATABASE_USER:-postgres}
       POSTGRES_PASSWORD: ${FF_ETH_LOGS_DATABASE_PASSWORD:-postgres}
