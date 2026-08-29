@@ -35,7 +35,7 @@ The historical half of that traffic does not need a node at all. The warehouse h
 
 ## 5. Out-of-scope capabilities
 
-- **ERC-20** — 3-topic `Transfer` logs share the ERC-721 signature and are not stored; `[[Transfer]]` returns only 4-topic logs (the same as a node answering `[[Transfer],[],[],[]]`).
+- **ERC-20** — 3-topic `Transfer` logs share the ERC-721 signature and are not stored. An unpadded `[[Transfer]]` filter is therefore out of warehouse scope (a node would also return the 3-topic logs); Transfer-family filters must carry four topic positions, e.g. `[[Transfer], null, null, null]`, and are then answered exactly ([api design](api_design.md)).
 - **Non-NFT events** and any `topics[0]` outside the set — refused, not partially answered.
 - **State calls** — `eth_call`, `eth_getCode`, `eth_getTransactionReceipt`, `eth_getBlockByNumber` and every other method return `-32601`.
 - **Tip data** — nothing above the warehouse head; `latest` / `safe` / `finalized` all resolve to the head, `pending` is refused.

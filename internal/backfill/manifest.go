@@ -87,9 +87,23 @@ func (m *Manifest) partRows(part uint64) (int64, error) {
 // verifyFiles checks that every file the manifest lists exists locally with
 // the recorded size and MD5, and that no unlisted Parquet file is present.
 func (m *Manifest) verifyFiles(dir string) error {
+	return m.verifyFilesUnder(dir, "")
+}
+
+// verifyFilesUnder is verifyFiles restricted to manifest entries whose path
+// starts with prefix (e.g. "logs/part=016/" or "blocks/"). The loading
+// stages call it before they read a single row, so an altered or truncated
+// file is refused rather than loaded and only caught at finish — by which
+// time the resume logic would have treated the bad rows as done.
+func (m *Manifest) verifyFilesUnder(dir, prefix string) error {
 	names := make([]string, 0, len(m.Files))
 	for name := range m.Files {
-		names = append(names, name)
+		if strings.HasPrefix(name, prefix) {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return fmt.Errorf("%s lists no files under %q", ManifestName, prefix)
 	}
 	sort.Strings(names)
 	for _, name := range names {
@@ -102,15 +116,19 @@ func (m *Manifest) verifyFiles(dir string) error {
 			return fmt.Errorf("%s differs from %s (size %d vs %d, md5 %s vs %s); the copy is truncated or altered", name, ManifestName, size, want.Size, sum, want.MD5)
 		}
 	}
-	local, err := filepath.Glob(filepath.Join(dir, "*", "*.parquet"))
+	local, err := filepath.Glob(filepath.Join(dir, filepath.FromSlash(prefix)+"*.parquet"))
 	if err != nil {
 		return err
 	}
-	nested, err := filepath.Glob(filepath.Join(dir, "*", "*", "*.parquet"))
+	nested, err := filepath.Glob(filepath.Join(dir, filepath.FromSlash(prefix)+"*", "*.parquet"))
 	if err != nil {
 		return err
 	}
-	for _, path := range append(local, nested...) {
+	deeper, err := filepath.Glob(filepath.Join(dir, filepath.FromSlash(prefix)+"*", "*", "*.parquet"))
+	if err != nil {
+		return err
+	}
+	for _, path := range append(append(local, nested...), deeper...) {
 		rel, err := filepath.Rel(dir, path)
 		if err != nil {
 			return err

@@ -5,11 +5,14 @@
 //
 //	prepare  drop the secondary indexes (bulk-loading 400 M rows through four
 //	         random-order btrees would take days; sorted PK inserts are fine)
-//	logs     per part=NNN directory: COPY every Parquet file into an unlogged
-//	         staging table, then INSERT ... ORDER BY (block_number, log_index)
-//	         into eth_logs so the heap is chain-ordered; skip directories whose
-//	         range already has rows
-//	blocks   COPY blocks-*.parquet into eth_blocks (skip if already populated)
+//	logs     per partition in the manifest interval: verify the directory's
+//	         files against manifest.json, COPY them into a temp staging table,
+//	         then INSERT ... ORDER BY (block_number, log_index) into eth_logs
+//	         so the heap is chain-ordered; a partition already holding exactly
+//	         the manifest's rows is skipped, any other count is cleared and
+//	         reloaded
+//	blocks   verify blocks-*.parquet against the manifest, COPY the rows
+//	         inside the manifest interval into eth_blocks (same skip/reload rule)
 //	finish   verify the load against manifest.json (interval, per-partition
 //	         rows, file checksums), recreate the indexes, ANALYZE, publish
 //	         coverage [manifest first block, manifest last block]
@@ -27,7 +30,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -194,44 +196,52 @@ func isDuplicateRelation(err error) bool {
 	return strings.Contains(err.Error(), "already exists")
 }
 
-// Logs loads every logs/part=NNN directory in order.
+// Logs loads every partition the manifest interval implies, in order.
 func (l *Loader) Logs(ctx context.Context) error {
-	parts, err := filepath.Glob(filepath.Join(l.dir, "logs", "part=*"))
+	m, err := readManifest(l.dir)
 	if err != nil {
 		return err
 	}
-	sort.Strings(parts)
-	if len(parts) == 0 {
-		return fmt.Errorf("no logs/part=* directories under %s", l.dir)
-	}
-	for _, dir := range parts {
-		if err := l.loadPart(ctx, dir); err != nil {
+	for part := m.Blocks.First / logstore.PartitionBlocks; part <= m.Blocks.Last/logstore.PartitionBlocks; part++ {
+		if err := l.loadPart(ctx, m, part); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// loadPart loads one part directory into its partition.
-func (l *Loader) loadPart(ctx context.Context, dir string) error {
-	part, err := strconv.ParseUint(strings.TrimPrefix(filepath.Base(dir), "part="), 10, 64)
+// loadPart loads one partition. Its files are verified against the manifest
+// before a row is read; a partition whose database rows already equal the
+// manifest count is skipped, and one with any other non-zero count (a load
+// interrupted, or rows from a file that was since replaced) is cleared and
+// reloaded — "has rows" is never taken as "done".
+func (l *Loader) loadPart(ctx context.Context, m *Manifest, part uint64) error {
+	want, err := m.partRows(part)
 	if err != nil {
-		return fmt.Errorf("part directory %s: %w", dir, err)
+		return err
 	}
+	if err := m.verifyFilesUnder(l.dir, manifestPartDir(part)+"/"); err != nil {
+		return err
+	}
+	dir := filepath.Join(l.dir, filepath.FromSlash(manifestPartDir(part)))
 	lo := part * logstore.PartitionBlocks
 	hi := lo + logstore.PartitionBlocks - 1
 	files, err := parquetFiles(dir)
 	if err != nil {
 		return err
 	}
-	var exists bool
-	if err := l.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM eth_logs WHERE block_number BETWEEN $1 AND $2)`,
-		int64(lo), int64(hi)).Scan(&exists); err != nil { //nolint:gosec // fits int64
-		return fmt.Errorf("check partition %d: %w", part, err)
+	var have int64
+	if err := l.pool.QueryRow(ctx, `SELECT COUNT(*) FROM eth_logs WHERE block_number BETWEEN $1 AND $2`,
+		int64(lo), int64(hi)).Scan(&have); err != nil { //nolint:gosec // fits int64
+		return fmt.Errorf("count partition %d: %w", part, err)
 	}
-	if exists {
-		logger.InfoCtx(ctx, "Partition already loaded, skipping", zap.Uint64("part", part))
+	if have == want {
+		logger.InfoCtx(ctx, "Partition already loaded, skipping", zap.Uint64("part", part), zap.Int64("rows", have))
 		return nil
+	}
+	if have != 0 {
+		logger.WarnCtx(ctx, "Partition holds a different row count than the manifest; reloading it",
+			zap.Uint64("part", part), zap.Int64("rows", have), zap.Int64("manifestRows", want))
 	}
 	start := time.Now()
 	conn, err := l.pool.Acquire(ctx)
@@ -249,6 +259,9 @@ func (l *Loader) loadPart(ctx context.Context, dir string) error {
 		return err
 	}
 	defer rollback(tx)
+	if _, err := tx.Exec(ctx, `DELETE FROM eth_logs WHERE block_number BETWEEN $1 AND $2`, int64(lo), int64(hi)); err != nil { //nolint:gosec // fits int64
+		return fmt.Errorf("clear partition %d: %w", part, err)
+	}
 	if _, err := tx.Exec(ctx, `CREATE TEMP TABLE staging_logs (LIKE eth_logs) ON COMMIT DROP`); err != nil {
 		return fmt.Errorf("create staging: %w", err)
 	}
@@ -259,6 +272,9 @@ func (l *Loader) loadPart(ctx context.Context, dir string) error {
 			return fmt.Errorf("load %s: %w", file, err)
 		}
 		rows += n
+	}
+	if rows != want {
+		return fmt.Errorf("part %03d files hold %d rows, %s says %d; the copy is incomplete", part, rows, ManifestName, want)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO eth_logs SELECT * FROM staging_logs ORDER BY block_number, log_index`); err != nil {
 		return fmt.Errorf("insert part %d: %w", part, err)
@@ -285,17 +301,25 @@ func (l *Loader) Blocks(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := m.verifyFilesUnder(l.dir, "blocks/"); err != nil {
+		return err
+	}
 	files, err := parquetFiles(filepath.Join(l.dir, "blocks"))
 	if err != nil {
 		return err
 	}
-	var exists bool
-	if err := l.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM eth_blocks)`).Scan(&exists); err != nil {
+	var have int64
+	if err := l.pool.QueryRow(ctx, `SELECT COUNT(*) FROM eth_blocks WHERE number BETWEEN $1 AND $2`,
+		int64(m.Blocks.First), int64(m.Blocks.Last)).Scan(&have); err != nil { //nolint:gosec // fits int64
 		return fmt.Errorf("check blocks: %w", err)
 	}
-	if exists {
-		logger.InfoCtx(ctx, "Blocks already loaded, skipping")
+	if have == m.Blocks.Rows {
+		logger.InfoCtx(ctx, "Blocks already loaded, skipping", zap.Int64("rows", have))
 		return nil
+	}
+	if have != 0 {
+		logger.WarnCtx(ctx, "eth_blocks holds a different row count than the manifest; reloading",
+			zap.Int64("rows", have), zap.Int64("manifestRows", m.Blocks.Rows))
 	}
 	start := time.Now()
 	tx, err := l.pool.Begin(ctx)
@@ -303,6 +327,9 @@ func (l *Loader) Blocks(ctx context.Context) error {
 		return err
 	}
 	defer rollback(tx)
+	if _, err := tx.Exec(ctx, `DELETE FROM eth_blocks WHERE number BETWEEN $1 AND $2`, int64(m.Blocks.First), int64(m.Blocks.Last)); err != nil { //nolint:gosec // fits int64
+		return fmt.Errorf("clear blocks: %w", err)
+	}
 	var rows int64
 	inInterval := func(_ map[string]int, r parquet.Row, c map[string]int) bool {
 		n := r[c["number"]].Int64()

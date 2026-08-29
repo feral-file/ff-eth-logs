@@ -128,6 +128,7 @@ func TestLoaderEndToEnd(t *testing.T) {
 	// No manifest: finish and the blocks stage refuse before touching anything.
 	require.ErrorContains(t, l.Finish(ctx), "manifest.json is required at the export root")
 	require.ErrorContains(t, l.Blocks(ctx), "manifest.json is required at the export root")
+	require.ErrorContains(t, l.Logs(ctx), "manifest.json is required at the export root")
 	writeManifest(t, dir, 7, 1_000_005, map[string]int64{"000": 2, "001": 2})
 
 	require.NoError(t, l.Prepare(ctx))
@@ -145,7 +146,26 @@ func TestLoaderEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, ok, "cursor must stay unset until the load is verified")
 
+	// Corruption-and-retry recovery: an altered file is refused BEFORE it is
+	// loaded (nothing lands in the database), and after the file is restored
+	// the stage loads it; a partition that holds a wrong row count (an
+	// interrupted load, or rows from a since-replaced file) is reloaded rather
+	// than skipped as "done".
+	part0 := filepath.Join(dir, "logs", "part=000", "logs-000000000000.parquet")
+	good, err := os.ReadFile(part0)
+	require.NoError(t, err)
+	bad := append(append([]byte{}, good[:len(good)-8]...), 1, 2, 3, 4, 5, 6, 7, 8) // a copy: good must stay intact for the restore
+	require.NoError(t, os.WriteFile(part0, bad, 0o600))
+	require.ErrorContains(t, l.Logs(ctx), "logs/part=000/logs-000000000000.parquet differs from manifest.json")
+	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM eth_logs`).Scan(&n))
+	assert.Equal(t, 0, n, "the altered file was never loaded")
+	require.NoError(t, os.WriteFile(part0, good, 0o600))
 	require.NoError(t, l.Logs(ctx))
+	_, err = pool.Exec(ctx, `DELETE FROM eth_logs WHERE block_number = 7`)
+	require.NoError(t, err)
+	require.NoError(t, l.Logs(ctx), "a partition with a wrong count is cleared and reloaded")
+	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM eth_logs WHERE block_number < 1000000`).Scan(&n))
+	assert.Equal(t, 2, n)
 
 	// A directory missing from the copy (not merely empty) blocks finish even
 	// though eth_blocks is contiguous and every present directory matches.
