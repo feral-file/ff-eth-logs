@@ -113,6 +113,9 @@ func (s *Store) WriteRange(ctx context.Context, from, to uint64, blocks []Block,
 	if uint64(len(blocks)) != to-from+1 {
 		return fmt.Errorf("write range %d-%d: got %d block rows, want %d", from, to, len(blocks), to-from+1)
 	}
+	if err := logsMatchBlocks(logs, blocks); err != nil {
+		return fmt.Errorf("write range %d-%d: %w", from, to, err)
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -151,6 +154,31 @@ func (s *Store) WriteRange(ctx context.Context, from, to uint64, blocks []Block,
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// logsMatchBlocks refuses a batch whose logs came from a different block
+// than the metadata they would be stored under (a reorg between the log
+// fetch and the header fetch); ingestion retries such a batch, and this is
+// the last line of defense so the store never holds that pairing.
+func logsMatchBlocks(logs []types.Log, blocks []Block) error {
+	byNumber := make(map[uint64]common.Hash, len(blocks))
+	for _, b := range blocks {
+		byNumber[b.Number] = b.Hash
+	}
+	for i := range logs {
+		l := &logs[i]
+		if l.BlockHash == (common.Hash{}) {
+			continue
+		}
+		h, ok := byNumber[l.BlockNumber]
+		if !ok {
+			return fmt.Errorf("log at block %d has no block row in the batch", l.BlockNumber)
+		}
+		if h != l.BlockHash {
+			return fmt.Errorf("log at block %d carries block hash %s but the block row is %s", l.BlockNumber, l.BlockHash.Hex(), h.Hex())
+		}
+	}
+	return nil
 }
 
 // ensurePartitions creates any eth_logs partition [from, to] touches that the

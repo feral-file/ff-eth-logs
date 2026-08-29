@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
@@ -527,4 +528,76 @@ func TestRun_ResumePointStillCanonicalSeedsBridge(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	require.Empty(t, f.sink.rewinds)
 	require.Equal(t, [][2]uint64{{101, 101}}, f.sink.ranges())
+}
+
+// TestRun_CatchupBoundPreemptsBridgeWalk pins that a stale cursor is refused
+// before reconciliation spends a single header RPC on it: with the resume
+// bridge retained (99), a far tip would otherwise be walked down to 99 by
+// eth_getBlockByNumber before max_catchup_blocks was consulted.
+func TestRun_CatchupBoundPreemptsBridgeWalk(t *testing.T) {
+	t.Parallel()
+
+	c := &headChain{}
+	canonical99 := c.canonical(99)
+	f := newFixture(t, c.orphanTip(5_000, common.HexToHash("0xfar")))
+	f.sink.seedStored(c, 90, 99)
+	// Only the resume check may touch the chain; the strict mock fails on any other HeadByNumber.
+	f.expectHead(99, canonical99)
+
+	err := f.run(context.Background(), ingestion.Config{MaxCatchupBlocks: 100}, 100)
+	require.ErrorIs(t, err, ingestion.ErrCatchupTooLarge)
+	require.Contains(t, err.Error(), "need blocks 100-5000")
+	require.Empty(t, f.sink.calls)
+}
+
+// TestRun_BatchRefetchedWhenLogsDisagreeWithHeaders pins the guard against a
+// reorg between the log fetch and the header fetch: the logs for 100 carry a
+// block hash the retained head does not, so the retained head is dropped,
+// refetched canonical, and the batch is fetched again before anything is
+// written — and what is written pairs the logs with their own block.
+func TestRun_BatchRefetchedWhenLogsDisagreeWithHeaders(t *testing.T) {
+	t.Parallel()
+
+	c := &headChain{}
+	stale100 := c.next(100) // the head the subscription delivered
+	f := newFixture(t, stale100)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	canonical100 := head(100, common.HexToHash("0xc100"), stale100.ParentHash) // what the node holds by the time logs are fetched
+	logAt := func(h *chain.BlockHead) types.Log {
+		l := transferLog(100, 0)
+		l.BlockHash = h.Hash
+		return l
+	}
+	inOrder(
+		f.expectLogs(100, 100, logAt(canonical100)), // logs already come from the new block
+		// disagreement → retained 100 dropped; the batch is fetched again (logs first), then 100 refetched canonical
+		f.expectLogs(100, 100, logAt(canonical100)),
+		f.expectHead(100, canonical100),
+	)
+	f.sink.steps = []func(uint64, uint64) error{thenCancel(cancel)}
+
+	err := f.run(ctx, ingestion.Config{}, 100)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, [][2]uint64{{100, 100}}, f.sink.ranges())
+	require.Equal(t, canonical100.Hash, f.sink.calls[0].Blocks[0].Hash)
+	require.Equal(t, canonical100.Hash, f.sink.calls[0].Logs[0].BlockHash)
+}
+
+// TestRun_BatchGivesUpWhenChainKeepsMoving pins the bound of that retry: a
+// batch whose logs and headers never agree is not written and ingestion
+// stops with a named error rather than looping.
+func TestRun_BatchGivesUpWhenChainKeepsMoving(t *testing.T) {
+	t.Parallel()
+
+	c := &headChain{}
+	f := newFixture(t, c.next(100))
+	other := transferLog(100, 0)
+	other.BlockHash = common.HexToHash("0x07e4")
+	f.client.EXPECT().FilterLogs(gomock.Any(), logsFor(100, 100)).Return([]types.Log{other}, nil).Times(3)
+	f.client.EXPECT().HeadByNumber(gomock.Any(), uint64(100)).Return(c.canonical(100), nil).Times(2)
+
+	err := f.run(context.Background(), ingestion.Config{}, 100)
+	require.ErrorContains(t, err, "kept changing between log and header fetches for batch 100-100 (3 attempts)")
+	require.Empty(t, f.sink.calls)
 }

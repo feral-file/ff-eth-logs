@@ -284,3 +284,20 @@ func TestReadSnapshotSurvivesConcurrentRewind(t *testing.T) {
 		return nil
 	}))
 }
+
+// TestWriteRangeRefusesLogsFromAnotherBlock pins the store-level guard: a
+// log whose blockHash is not the block row it would be stored under is
+// refused, so a reorg between two ingestion fetches can never land here.
+func TestWriteRangeRefusesLogsFromAnotherBlock(t *testing.T) {
+	ctx := context.Background()
+	s := NewFromPool(testdb.Open(t))
+	l := types.Log{BlockNumber: 10, Address: common.HexToAddress("0x1"), Topics: []common.Hash{common.HexToHash("0xa")}, Data: []byte{}, BlockHash: common.HexToHash("0xbad")}
+	err := s.WriteRange(ctx, 10, 10, []Block{blockAt(10)}, []types.Log{l})
+	require.ErrorContains(t, err, "log at block 10 carries block hash")
+	_, ok, err := s.Coverage(ctx)
+	require.NoError(t, err)
+	assert.False(t, ok, "nothing was written")
+
+	l.BlockHash = blockAt(10).Hash
+	require.NoError(t, s.WriteRange(ctx, 10, 10, []Block{blockAt(10)}, []types.Log{l}))
+}

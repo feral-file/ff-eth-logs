@@ -100,6 +100,8 @@ The gap from the cursor to the tip exceeds the bound; the bound exists so a stal
 
 The stages are idempotent, so the same command resumes after a failure. To reload one partition deliberately (a corrupt copy, a re-exported directory): stop the service, empty the partition (`TRUNCATE eth_logs_pNNN`), run `-stage logs` (only that directory loads), then `-stage finish` (indexes already exist — tolerated — and the cursor is re-derived from `eth_blocks`). If the indexes were not dropped first the reload is slower but correct.
 
+`finish` verifies that what is on disk is fully loaded, not that the export itself is complete: an export whose logs are a deliberate subset (the one-day `v0-rehearsal` prefix) would publish full coverage over blocks whose logs are missing. Only the full `v1` export (or a full re-export) is a valid input; never `finish` a partial one.
+
 Never run `backfill` while ingestion is writing: `finish` would publish coverage from `eth_blocks` under a concurrent writer, and `prepare` would drop the indexes the API is serving from.
 
 On start, ingestion verifies the provider with `eth_chainId`; a mismatch (`provider chain id X does not match configured ethereum.chain_id Y`) is fatal before any block is written. A `start_block` that is not contiguous with the current coverage is refused at the first write (`write is not contiguous with warehouse coverage`): rewind to it instead, or unset it.

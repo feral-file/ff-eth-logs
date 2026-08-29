@@ -220,18 +220,24 @@ func drainHeads(heads <-chan *chain.BlockHead) []*chain.BlockHead {
 // canonical heads by number (see reconcile), so a deep reorg announced only by
 // a later tip is still found and reported.
 func (s *Subscriber) planRange(ctx context.Context, st *streamState, batch []*chain.BlockHead) (from, to uint64, ok bool, err error) {
+	// Preflight the bound on the received heads before any of them is
+	// reconciled: with a bridge retained (always, after a restart), reconcile
+	// walks eth_getBlockByNumber down to it, so a stale cursor would pay the
+	// whole gap in header RPCs before the guard below ever ran.
+	highest := st.tip
+	for _, h := range batch {
+		highest = max(highest, uint64(h.Number))
+	}
+	if err := s.checkCatchupBound(st.next, highest); err != nil {
+		return 0, 0, false, err
+	}
 	for _, h := range batch {
 		if err := s.record(ctx, st, h); err != nil {
 			return 0, 0, false, err
 		}
 	}
-	// The catch-up bound covers the whole gap to the tip, pending window
-	// included: measuring only the confirmed range would let a gap of
-	// max+lag through, and a large lag would defer an oversized gap past the
-	// bound one block at a time.
-	if s.cfg.MaxCatchupBlocks > 0 && st.tip >= st.next && st.tip-st.next+1 > s.cfg.MaxCatchupBlocks {
-		return 0, 0, false, fmt.Errorf("%w: need blocks %d-%d (%d blocks, max %d); rewind deliberately or raise ethereum.max_catchup_blocks",
-			ErrCatchupTooLarge, st.next, st.tip, st.tip-st.next+1, s.cfg.MaxCatchupBlocks)
+	if err := s.checkCatchupBound(st.next, st.tip); err != nil {
+		return 0, 0, false, err
 	}
 	if st.tip < s.cfg.ConfirmationBlocks {
 		return 0, 0, false, nil
@@ -251,6 +257,19 @@ func (s *Subscriber) planRange(ctx context.Context, st *streamState, batch []*ch
 		st.heads[to] = boundary
 	}
 	return st.next, to, true, nil
+}
+
+// checkCatchupBound enforces MaxCatchupBlocks on the gap from the first
+// unwritten block to `tip`. The bound covers the whole gap, pending window
+// included: measuring only the confirmed range would let a gap of max+lag
+// through, and a large lag would defer an oversized gap past the bound one
+// block at a time.
+func (s *Subscriber) checkCatchupBound(next, tip uint64) error {
+	if s.cfg.MaxCatchupBlocks > 0 && tip >= next && tip-next+1 > s.cfg.MaxCatchupBlocks {
+		return fmt.Errorf("%w: need blocks %d-%d (%d blocks, max %d); rewind deliberately or raise ethereum.max_catchup_blocks",
+			ErrCatchupTooLarge, next, tip, tip-next+1, s.cfg.MaxCatchupBlocks)
+	}
+	return nil
 }
 
 // record stores one head according to the rules in planRange, reconciling
@@ -509,29 +528,82 @@ func (s *Subscriber) ingestRange(ctx context.Context, st *streamState, from, to 
 	return nil
 }
 
+// batchConsistencyAttempts bounds how often a batch is refetched because
+// the chain moved between its log fetch and its header fetch.
+const batchConsistencyAttempts = 3
+
 // ingestBatch fetches one batch, drops logs outside the warehouse shape, and
-// writes blocks + logs + cursor atomically.
+// writes blocks + logs + cursor atomically — but only once the logs and the
+// block metadata describe the same chain.
+//
+// Reason: eth_getLogs and the block headers are two calls (and the headers
+// may be retained from an earlier notification). A reorg landing between
+// them would pair old-branch logs with new-branch hashes, and a later fork
+// walk would then trust those hashes and stop above the stale logs. Every
+// log carries the hash of the block it came from, so the batch is accepted
+// only when each log's blockHash equals the metadata hash for its height;
+// otherwise the retained heads for the disagreeing heights are dropped (so
+// they are refetched canonical) and the whole batch is fetched again.
+// Trade-offs: a provider that omits blockHash cannot be verified this way
+// (the zero hash is skipped); mainnet providers always populate it.
 func (s *Subscriber) ingestBatch(ctx context.Context, st *streamState, from, to uint64) error {
-	logs, err := s.fetcher.FetchIngestionLogs(ctx, from, to)
-	if err != nil {
-		return fmt.Errorf("fetch ingestion logs for blocks %d-%d: %w", from, to, err)
-	}
-	kept := logs[:0]
-	for _, l := range logs {
-		if eventset.Keep(l.Topics, l.Address) {
-			kept = append(kept, l)
+	for attempt := 1; ; attempt++ {
+		logs, err := s.fetcher.FetchIngestionLogs(ctx, from, to)
+		if err != nil {
+			return fmt.Errorf("fetch ingestion logs for blocks %d-%d: %w", from, to, err)
+		}
+		kept := logs[:0]
+		for _, l := range logs {
+			if eventset.Keep(l.Topics, l.Address) {
+				kept = append(kept, l)
+			}
+		}
+		blocks, err := s.blockMetadata(ctx, st, from, to)
+		if err != nil {
+			return err
+		}
+		moved := disagreeingHeights(kept, blocks)
+		if len(moved) == 0 {
+			if err := s.sink.WriteRange(ctx, from, to, blocks, kept); err != nil {
+				return fmt.Errorf("write blocks %d-%d: %w", from, to, err)
+			}
+			logger.DebugCtx(ctx, "Wrote confirmed blocks",
+				zap.Uint64("fromBlock", from), zap.Uint64("toBlock", to), zap.Int("logs", len(kept)), zap.Int("fetched", len(logs)))
+			return nil
+		}
+		if attempt == batchConsistencyAttempts {
+			return fmt.Errorf("blocks %v kept changing between log and header fetches for batch %d-%d (%d attempts); the chain is unstable at the confirmation depth",
+				moved, from, to, attempt)
+		}
+		logger.WarnCtx(ctx, "Block hashes moved between the log fetch and the header fetch; refetching the batch",
+			zap.Uint64("fromBlock", from), zap.Uint64("toBlock", to), zap.Uint64s("heights", moved), zap.Int("attempt", attempt))
+		for _, n := range moved {
+			delete(st.heads, n)
 		}
 	}
-	blocks, err := s.blockMetadata(ctx, st, from, to)
-	if err != nil {
-		return err
+}
+
+// disagreeingHeights returns the block numbers whose logs report a different
+// block hash than the metadata for that height, ascending.
+func disagreeingHeights(logs []types.Log, blocks []logstore.Block) []uint64 {
+	byNumber := make(map[uint64]common.Hash, len(blocks))
+	for _, b := range blocks {
+		byNumber[b.Number] = b.Hash
 	}
-	if err := s.sink.WriteRange(ctx, from, to, blocks, kept); err != nil {
-		return fmt.Errorf("write blocks %d-%d: %w", from, to, err)
+	seen := map[uint64]struct{}{}
+	var out []uint64
+	for _, l := range logs {
+		if l.BlockHash == (common.Hash{}) {
+			continue
+		}
+		if h, ok := byNumber[l.BlockNumber]; ok && h != l.BlockHash {
+			if _, dup := seen[l.BlockNumber]; !dup {
+				seen[l.BlockNumber] = struct{}{}
+				out = append(out, l.BlockNumber)
+			}
+		}
 	}
-	logger.DebugCtx(ctx, "Wrote confirmed blocks",
-		zap.Uint64("fromBlock", from), zap.Uint64("toBlock", to), zap.Int("logs", len(kept)), zap.Int("fetched", len(logs)))
-	return nil
+	return out
 }
 
 // blockMetadata returns (number, hash, timestamp) for every block in
