@@ -38,7 +38,7 @@ The historical half of that traffic does not need a node at all. The warehouse h
 - **ERC-20** — 3-topic `Transfer` logs share the ERC-721 signature and are not stored: every `Transfer` filter is answered from the 4-topic logs only, which is the vendor's answer minus the ERC-20 and pre-standard transfers (the vendor ignores topic position count, so no filter shape changes this — [api design](api_design.md)). Consumers that need ERC-20 transfers ask a node.
 - **Non-NFT events** and any `topics[0]` outside the set — refused, not partially answered.
 - **State calls** — `eth_call`, `eth_getCode`, `eth_getTransactionReceipt`, `eth_getBlockByNumber` and every other method return `-32601`.
-- **Tip data** — nothing above the warehouse head; `latest` / `safe` / `finalized` all resolve to the head, `pending` is refused.
+- **Tip data** — nothing above the warehouse head; only `latest` resolves to the head, while `safe`, `finalized` and `pending` are refused (the head is only `confirmation_blocks` deep, so those tags fall through to a node — [api design](api_design.md)).
 - **Other chains** — mainnet only; one warehouse per deployment.
 - **Authentication, TLS, rate limiting** — the endpoint binds on a private network; see [constraints](constraints.md).
 

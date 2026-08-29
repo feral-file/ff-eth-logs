@@ -989,3 +989,51 @@ func TestRun_SilentSubscriptionIsFatal(t *testing.T) {
 	require.ErrorIs(t, err, ingestion.ErrHeadsSilent, "silence after the write is still caught")
 	require.Equal(t, [][2]uint64{{100, 100}}, f2.sink.ranges(), "the write itself was not interrupted by the watchdog")
 }
+
+// TestRun_BoundaryReorgInLaterBatchUsesDurableHead pins that the stream
+// position follows every committed batch of a multi-batch range: when the
+// second batch finds its first block not descending from the block the
+// first batch wrote, recovery runs from that durable head (109), rewinds to
+// the verified ancestor 108, and the replanned range rewrites from 109.
+func TestRun_BoundaryReorgInLaterBatchUsesDurableHead(t *testing.T) {
+	t.Parallel()
+
+	old := &headChain{}
+	old.anchor(100)
+	old.extend(300)
+	reorged := &headChain{seq: 10_000}
+	reorged.store(old.canonical(108))
+	reorged.last = old.canonical(108) // the new chain diverges at 109
+	reorged.extend(300)
+	far := old.canonical(300)
+
+	f := newFixture(t, far)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.sink.seedStored(old, 90, 99)
+	srv := &chainServer{c: old, override: map[uint64][]*chain.BlockHead{}}
+	// The reorg lands between the two batches: the first fetch of 110 (start
+	// of batch 2) already answers from the new chain, whose 109 differs from
+	// the 109 batch 1 wrote.
+	srv.override[110] = []*chain.BlockHead{reorged.canonical(110)}
+	srv.onFetch = func(n uint64) {
+		if n == 110 && srv.c == old {
+			srv.c = reorged
+		}
+	}
+	srv.install(f)
+	f.serveLogs(nil)
+	f.sink.steps = []func(uint64, uint64) error{nil, thenCancel(cancel)}
+	go func() {
+		for len(f.sink.rewinds) == 0 {
+			time.Sleep(5 * time.Millisecond)
+		}
+		f.push(reorged.canonical(300))
+	}()
+
+	err := f.run(ctx, ingestion.Config{}, 100)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, []uint64{108}, f.sink.rewinds, "recovery ran from the durable head 109, not from the range start")
+	require.Equal(t, [][2]uint64{{100, 109}, {109, 118}}, f.sink.ranges())
+	require.Equal(t, reorged.canonical(109).Hash, f.sink.calls[1].Blocks[0].Hash)
+}

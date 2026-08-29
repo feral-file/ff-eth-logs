@@ -83,7 +83,7 @@ Scope checks run before the head is read, so they are reported even on an empty 
 
 ### 3.4 Matching semantics
 
-go-ethereum's `filterLogs` rules, reproduced in SQL:
+The vendor's matching rules, reproduced in SQL:
 
 - `address` values are OR'd; empty means any.
 - `topics[i]` values are OR'd within a position and AND'd across positions; an empty position is a wildcard.

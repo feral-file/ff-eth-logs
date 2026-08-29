@@ -614,6 +614,10 @@ func (s *Subscriber) ingestRange(ctx context.Context, st *streamState, from, to 
 		if err := s.ingestBatch(ctx, st, batchFrom, batchTo); err != nil {
 			return err
 		}
+		// The batch is durable: move the stream position past it now, so a
+		// recovery triggered by a later batch of the same range reports and
+		// rewinds from the real written head, not the range's start.
+		st.next = batchTo + 1
 		batches++
 		if batches%catchupLogEvery == 0 {
 			logger.InfoCtx(ctx, "Ethereum ingestion catch-up progress",
