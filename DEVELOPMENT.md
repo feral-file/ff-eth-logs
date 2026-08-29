@@ -71,7 +71,7 @@ The binary supports **dual configuration**: a YAML file and `FF_ETH_LOGS_*` envi
 | `ethereum.head_timeout` | `5m` | Exit (`newHeads subscription is silent`) when no head arrives for this long while waiting; never during a catch-up. `0` disables |
 | `ethereum.getlogs_span_cap` | `10000` | Provider `eth_getLogs` block-range cap (`toBlock - fromBlock`); `0` = discover by rejection |
 | `rpc.max_results` | `100000` | Above this, `eth_getLogs` returns `query returned more than N results`; `0` = unlimited |
-| `rpc.query_timeout` | `60s` | Bounds one `eth_getLogs` database query |
+| `rpc.query_timeout` | `60s` | Bounds every warehouse read: an `eth_getLogs` query, the `eth_blockNumber` head read and the `/health` read (which returns `503` on expiry) |
 
 Validation fails fast with `missing required config: ...` listing every missing key, and rejects `ethereum.confirmation_blocks` at or above a non-zero `ethereum.max_catchup_blocks` and a negative `rpc.max_results`.
 

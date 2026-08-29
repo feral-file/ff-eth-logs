@@ -192,6 +192,14 @@ func runRewind(args []string) error {
 		return err
 	}
 	defer store.Close()
+	// Rewind is the third writer: under the same lock as ingestion and the
+	// backfill, so it cannot delete rows a running finish just verified or
+	// pull the head out from under a live tail.
+	release, err := store.AcquireWriterLock(ctx)
+	if err != nil {
+		return fmt.Errorf("rewind: %w (stop the service first)", err)
+	}
+	defer release()
 	if err := store.Rewind(ctx, to); err != nil {
 		return err
 	}

@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -27,9 +30,20 @@ type fakeWarehouse struct {
 	blocks  map[common.Hash]logstore.Block
 	gotQ    *logstore.Query
 	gotLim  int
+	// sawDeadline records whether the last Read ran under a deadline; hang
+	// makes Read block until the context ends (a stuck database).
+	sawDeadline bool
+	hang        bool
 }
 
-func (f *fakeWarehouse) Read(_ context.Context, fn func(logstore.View) error) error { return fn(f) }
+func (f *fakeWarehouse) Read(ctx context.Context, fn func(logstore.View) error) error {
+	_, f.sawDeadline = ctx.Deadline()
+	if f.hang {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return fn(f)
+}
 
 func (f *fakeWarehouse) Coverage(context.Context) (logstore.Coverage, bool, error) {
 	return logstore.Coverage{Start: f.start, Head: f.head}, !f.empty, f.headErr
@@ -266,4 +280,31 @@ func TestBlockNumberAndChainID(t *testing.T) {
 
 	_, err = NewAPI(&fakeWarehouse{headErr: errors.New("db down")}, Config{}).BlockNumber(context.Background())
 	assert.EqualError(t, err, "db down")
+}
+
+// TestReadsAreBoundedByQueryTimeout pins that eth_blockNumber and /health,
+// not only eth_getLogs, run under rpc.query_timeout: a stuck database
+// returns an error (503 for /health) within the timeout instead of holding
+// the request open.
+func TestReadsAreBoundedByQueryTimeout(t *testing.T) {
+	wh := &fakeWarehouse{head: 100}
+	api := NewAPI(wh, Config{ChainID: 1, QueryTimeout: 50 * time.Millisecond})
+
+	_, err := api.BlockNumber(context.Background())
+	require.NoError(t, err)
+	assert.True(t, wh.sawDeadline, "eth_blockNumber runs under the query timeout")
+
+	wh.hang = true
+	start := time.Now()
+	_, err = api.BlockNumber(context.Background())
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Less(t, time.Since(start), time.Second)
+
+	rec := httptest.NewRecorder()
+	api.health(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Contains(t, rec.Body.String(), "deadline exceeded")
+
+	_, err = api.GetLogs(context.Background(), transferCrit(1, 2))
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 }

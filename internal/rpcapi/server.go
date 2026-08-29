@@ -83,11 +83,13 @@ func (s *Server) Run(ctx context.Context) error {
 // answers; lag is for dashboards, not for the healthcheck, because a long
 // catch-up is a healthy state.
 func (a *API) health(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := a.bounded(r.Context())
+	defer cancel()
 	var cov logstore.Coverage
 	var ok bool
-	err := a.store.Read(r.Context(), func(v logstore.View) error {
+	err := a.store.Read(ctx, func(v logstore.View) error {
 		var err error
-		cov, ok, err = v.Coverage(r.Context())
+		cov, ok, err = v.Coverage(ctx)
 		return err
 	})
 	w.Header().Set("Content-Type", "application/json")

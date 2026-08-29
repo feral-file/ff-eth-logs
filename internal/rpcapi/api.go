@@ -80,8 +80,21 @@ func (a *API) BlockNumber(ctx context.Context) (hexutil.Uint64, error) {
 	return hexutil.Uint64(cov.Head), nil
 }
 
+// bounded applies rpc.query_timeout to a warehouse read. Every read goes
+// through it — eth_getLogs, eth_blockNumber and /health alike — so a live
+// but unresponsive database connection cannot hold a request (or the
+// routing client's head lookup, or the health check) past the timeout.
+func (a *API) bounded(ctx context.Context) (context.Context, context.CancelFunc) {
+	if a.cfg.QueryTimeout > 0 {
+		return context.WithTimeout(ctx, a.cfg.QueryTimeout)
+	}
+	return context.WithCancel(ctx)
+}
+
 // coverage reads the covered interval, refusing an empty warehouse.
 func (a *API) coverage(ctx context.Context) (logstore.Coverage, error) {
+	ctx, cancel := a.bounded(ctx)
+	defer cancel()
 	var cov logstore.Coverage
 	err := a.store.Read(ctx, func(v logstore.View) error {
 		c, ok, err := v.Coverage(ctx)
@@ -106,11 +119,8 @@ func (a *API) GetLogs(ctx context.Context, crit FilterCriteria) ([]*types.Log, e
 	if err := checkTopicScope(crit.Topics, crit.Addresses); err != nil {
 		return nil, err
 	}
-	if a.cfg.QueryTimeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, a.cfg.QueryTimeout)
-		defer cancel()
-	}
+	ctx, cancel := a.bounded(ctx)
+	defer cancel()
 	out := []*types.Log{}
 	err := a.store.Read(ctx, func(v logstore.View) error {
 		cov, ok, err := v.Coverage(ctx)
