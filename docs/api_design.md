@@ -68,7 +68,7 @@ What differs from the vendor is only the **stored set**: per signature, the ware
 
 | Signature | Never stored (a node returns them, the warehouse does not) |
 | --- | --- |
-| `Transfer` | logs with fewer than 4 topics — ERC-20 `Transfer`, pre-standard NFT transfers (CryptoKitties) |
+| `Transfer` | logs with fewer than 4 topics — ERC-20 `Transfer`, pre-standard NFT transfers (CryptoKitties) — **except** those emitted by CryptoPunks `0xb47e…3bbb`: its 3-topic internal `Transfer(seller, buyer, 1)` is stored in any shape, because it is the indexer's only trace of a corrupted `acceptBidForPunk` purchase (`PunkBought` with a zero indexed buyer) and the indexer probes block 3,919,706 for it before routing to a warehouse (ff-indexer-v2 #144) |
 | `TransferSingle`, `TransferBatch` | logs with fewer than 4 topics (malformed emitters) |
 | `MetadataUpdate`, `BatchMetadataUpdate` | logs with more than 1 topic (nonstandard emitters with indexed arguments) |
 | `URI` | logs with a topic count other than 2 |
@@ -122,7 +122,7 @@ Exceeding `rpc.max_results` (default 100,000) returns `-32000 query returned mor
 | CryptoPunks `Assign(address,uint256)` | `0x8a0e37b73a0d9c82e205d4d1a3ff3d0b57ce5f4d7bccf6bac03336dc101cb7ba` | same |
 | CryptoPunks `PunkBought(uint256,uint256,address,address)` | `0x58e5d5a525e3b40bc15abaa38b5882678db1ee68befd2f60bafe3a7fd06db9e3` | same |
 
-The stored shapes are the ones the indexer's parsers accept; a node holds more (3-topic ERC-20 and 1-topic pre-standard `Transfer`s, nonstandard `MetadataUpdate`/`URI` shapes, CryptoPunks-signature events from other contracts). An in-scope answer is therefore the vendor's answer minus those shapes and nothing else — for the Transfer family that means the ERC-20 and pre-standard logs a node would also return are absent; for the CryptoPunks signatures it means the logs other contracts emit under them are absent whatever the address selector says. Everything else (coverage, event set, tags) is a scope error for the vendor.
+The stored shapes are the ones the indexer's parsers accept; a node holds more (3-topic ERC-20 and 1-topic pre-standard `Transfer`s, nonstandard `MetadataUpdate`/`URI` shapes, CryptoPunks-signature events from other contracts). An in-scope answer is therefore the vendor's answer minus those shapes and nothing else — for the Transfer family that means the ERC-20 and pre-standard logs a node would also return are absent (the CryptoPunks contract's own 3-topic `Transfer` excepted: it is stored); for the CryptoPunks signatures it means the logs other contracts emit under them are absent whatever the address selector says. Everything else (coverage, event set, tags) is a scope error for the vendor.
 
 ## 4. What a routing client should do
 

@@ -9,7 +9,13 @@
 //     shares the ERC-721 signature but carries three topics instead of four;
 //     the indexer skips it at parse time (ff-indexer-v2 commit 60eba9b), so
 //     the warehouse never stores it. Same for a one-topic MetadataUpdate or a
-//     two-topic URI.
+//     two-topic URI. One exception: every Transfer-signature log emitted by
+//     the CryptoPunks contract is stored whatever its shape, because its
+//     3-topic internal Transfer(seller, buyer, 1) is the only trace of a
+//     corrupted acceptBidForPunk purchase (PunkBought with a zero indexed
+//     buyer) and the indexer's owner scan depends on it
+//     (ff-indexer-v2 adapters.GenericAdapter.OwnerQuerySpecs). The indexer
+//     probes for it before routing to a warehouse (ff-indexer-v2 #144).
 //
 // The BigQuery backfill (docs/probe_2026-08.md) applied exactly these rules,
 // so tail ingestion must too — otherwise the served set would depend on how
@@ -25,7 +31,7 @@ import (
 // init so a typo in a hex literal cannot silently drop an event family.
 var (
 	// Transfer is ERC-721 Transfer(address,address,uint256) — and, with three
-	// topics, ERC-20 Transfer, which Keep rejects.
+	// topics, ERC-20 Transfer, which Keep rejects except from CryptoPunks.
 	Transfer = crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)"))
 	// TransferSingle is ERC-1155 TransferSingle(address,address,address,uint256,uint256).
 	TransferSingle = crypto.Keccak256Hash([]byte("TransferSingle(address,address,address,uint256,uint256)"))
@@ -96,7 +102,7 @@ func IsWarehouseSignature(topic0 common.Hash) bool {
 func OmittedShapes(topic0 common.Hash) string {
 	switch topic0 {
 	case Transfer:
-		return "logs with fewer than 4 topics (ERC-20 Transfer, pre-standard NFT Transfer)"
+		return "logs with fewer than 4 topics (ERC-20 Transfer, pre-standard NFT Transfer), except those emitted by CryptoPunks " + CryptoPunksAddress.Hex()
 	case TransferSingle, TransferBatch:
 		return "logs with fewer than 4 topics (malformed emitters)"
 	case MetadataUpdate, BatchMetadataUpdate:
@@ -132,6 +138,9 @@ func IsCryptoPunksSignature(topic0 common.Hash) bool {
 func Keep(topics []common.Hash, address common.Address) bool {
 	if len(topics) == 0 {
 		return false
+	}
+	if topics[0] == Transfer && address == CryptoPunksAddress {
+		return true // the 3-topic internal Transfer; see the package doc
 	}
 	if want, ok := topicCount[topics[0]]; ok {
 		return len(topics) == want

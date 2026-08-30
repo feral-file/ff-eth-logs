@@ -49,6 +49,10 @@ func TestKeep(t *testing.T) {
 		{"erc721 transfer", []common.Hash{Transfer, h("0x1"), h("0x2"), h("0x3")}, other, true},
 		{"erc20 transfer (3 topics)", []common.Hash{Transfer, h("0x1"), h("0x2")}, other, false},
 		{"cryptokitties transfer (1 topic)", []common.Hash{Transfer}, other, false},
+		// The CryptoPunks internal Transfer(seller, buyer, 1) is the indexer's
+		// only trigger for corrupted PunkBought repairs (ff-indexer-v2 #144).
+		{"cryptopunks internal transfer (3 topics)", []common.Hash{Transfer, h("0x1"), h("0x2")}, CryptoPunksAddress, true},
+		{"cryptopunks transfer any shape", []common.Hash{Transfer}, CryptoPunksAddress, true},
 		{"transfer single", []common.Hash{TransferSingle, h("0x1"), h("0x2"), h("0x3")}, other, true},
 		{"transfer single short", []common.Hash{TransferSingle, h("0x1")}, other, false},
 		{"transfer batch", []common.Hash{TransferBatch, h("0x1"), h("0x2"), h("0x3")}, other, true},
