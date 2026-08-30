@@ -1,0 +1,25 @@
+---
+description: API design rules and contract sources for ff-eth-logs
+alwaysApply: true
+---
+
+# API Design Rules
+
+**Conventions and evolution rules** live in `docs/api_design.md`.
+
+**Normative contract** (must match implementation):
+
+- The HTTP JSON-RPC surface is `eth_getLogs`, `eth_blockNumber`, and `eth_chainId`, implemented in `internal/rpcapi`.
+- `eth_getLogs` request and response shapes, filter semantics (`fromBlock`, `toBlock`, `blockHash`, `address`, `topics`), hex encoding, and JSON-RPC error codes must match a standard Ethereum node byte-for-byte so the Feral File indexer can swap this service in for a vendor RPC without client changes.
+- The served event set (signatures and topic shapes) is defined once in `internal/eventset` and documented in `docs/api_design.md`.
+
+**Enforced limits and defaults** (block-range caps, result caps, request timeouts) are defined in code alongside the JSON-RPC handlers. When changing behavior:
+
+- Update **constants**, **handler validation**, and **`docs/api_design.md`** together so clients, docs, and enforcement do not drift.
+- Keep limit errors explicit: a rejected range or oversized result must return a JSON-RPC error, never a silently truncated result.
+
+Rules:
+
+- Preserve `eth_getLogs` parity unless a documented, versioned deviation is planned; call out **any** deviation in `docs/api_design.md`.
+- Treat a change to the served event set as an API change: update `docs/api_design.md`, `docs/schema.md`, and tests together.
+- Call out **breaking** changes (methods, filter semantics, error codes, event set) explicitly in PRs and release notes.

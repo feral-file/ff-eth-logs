@@ -1,0 +1,21 @@
+---
+description: In-repo architecture guidance and boundaries
+alwaysApply: true
+---
+
+# Architecture Guidance
+
+**System design** for this repository lives in `docs/architecture.md` (components, data flow, the PostgreSQL log warehouse, head-driven tail ingestion, the Parquet backfill loader, and JSON-RPC server behavior).
+
+**Product, API, and guardrails** intersect with:
+
+- `docs/constraints.md` — deployment topology, dependencies, consistency expectations
+- `docs/business_requirements.md` — what this service is for and what is out of scope
+- `docs/api_design.md` — how the public JSON-RPC surface evolves
+- `docs/operations.md` — deployment and runbooks for ingestion, backfill, and rewind
+
+Rules:
+
+- Prefer **existing patterns** in `cmd/ff-eth-logs` and `internal/` (`eventset`, `chain`, `ingestion`, `logstore`, `rpcapi`, `backfill`) unless a change is justified by reliability, simplicity, or documented requirements.
+- Keep the package boundaries: `chain` talks to the upstream RPC, `logstore` talks to PostgreSQL, `rpcapi` only reads from `logstore`, and `eventset` is the single definition of which signatures and topic shapes are stored.
+- **Architecture-affecting** changes (new processes, new infrastructure dependencies, new cross-service contracts, changes to the served event set) need an explicit note in the PR/handoff and updates to `docs/architecture.md` when behavior or topology changes.

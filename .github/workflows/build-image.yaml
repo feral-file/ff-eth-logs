@@ -1,0 +1,84 @@
+name: Build Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version suffix for the image tag (for example: 0.1.0, prod, 2026-09-01). If empty, use the commit hash."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  DOCR_REGISTRY_NAME: feral-file
+  DOCR_REGISTRY: registry.digitalocean.com/feral-file
+  DOCR_REPOSITORY: apps
+  DOCR_TAG_PREFIX: ff-eth-logs-
+
+jobs:
+  build-and-push:
+    name: Build and push image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Determine image tag
+        id: determine-tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          if [ -n "${INPUT_TAG}" ]; then
+            TAG="${DOCR_TAG_PREFIX}${INPUT_TAG}"
+          else
+            TAG="${DOCR_TAG_PREFIX}${GIT_SHA::12}"
+          fi
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "Using tag: ${TAG}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_DOCR_TOKEN }}
+
+      - name: Login to DigitalOcean Container Registry
+        run: doctl registry login --expiry-seconds 1200
+
+      - name: Generate Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCR_REGISTRY }}/${{ env.DOCR_REPOSITORY }}
+          tags: |
+            type=raw,value=${{ steps.determine-tag.outputs.tag }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./tools/docker/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+          sbom: false
+
+      # No automatic tag cleanup: a tag may be the one ff-deploy currently runs
+      # or the rollback target, and this workflow cannot tell. Prune by hand
+      # in the registry once a tag is verified unreferenced.
+      - name: Output image tag
+        run: |
+          echo "## Built image" >> "${GITHUB_STEP_SUMMARY}"
+          echo "" >> "${GITHUB_STEP_SUMMARY}"
+          echo "- \`${DOCR_REGISTRY}/${DOCR_REPOSITORY}:${{ steps.determine-tag.outputs.tag }}\`" >> "${GITHUB_STEP_SUMMARY}"

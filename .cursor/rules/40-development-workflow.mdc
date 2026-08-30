@@ -1,0 +1,48 @@
+---
+description: Repo workflow, generators, and verification commands
+alwaysApply: true
+---
+
+# Development Workflow
+
+## Code generation
+
+### Mock generation
+
+When interfaces with `//go:generate mockgen` are added, changed, or removed:
+
+```bash
+go generate ./...
+```
+
+Mocks are generated with `go.uber.org/mock` into `internal/mocks`. Do not edit generated mocks manually.
+
+## Database schema changes
+
+1. Add a migration under `db/migrations/` with sequential naming (`NNN.sql`).
+2. Mirror the change in `db/init_pg_db.sql`.
+3. Update `docs/schema.md` and any integration-test fixtures that depend on the changed shape.
+
+## Documentation updates
+
+- Update `docs/` for schema, architecture, API, or operational changes.
+- Update `README.md` or `DEVELOPMENT.md` for setup, workflow, or major behavior changes.
+
+## Verification
+
+Primary verification command:
+
+```bash
+make check
+```
+
+This is the canonical local verification entrypoint (see the `check` target in the `Makefile`: `imports`, `fmt-check`, `lint`, `test`, `test-integration`). Integration tests are tagged `//go:build integration` and need PostgreSQL (testcontainers, or `TEST_DB_*` for an external database).
+
+CI defines its own steps in `.github/workflows/`. If the full verification path cannot be run, state that clearly, explain the blocker, and report what was run instead.
+
+## Definition of done
+
+- Keep coverage non-regressing versus the base branch unless the PR explicitly documents the exception and why it is necessary.
+- Update docs when behavior, setup, architecture, or verification contracts change.
+- Review the full diff before handoff or re-review.
+- Keep the PR body aligned with `.github/PULL_REQUEST_TEMPLATE.md`.

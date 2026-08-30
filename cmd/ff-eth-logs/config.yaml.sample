@@ -1,0 +1,39 @@
+# FF Eth Logs configuration.
+#
+# Copy to config/config.yaml or pass -config path. Environment overrides:
+# FF_ETH_LOGS_* with dots as underscores (ethereum.websocket_url →
+# FF_ETH_LOGS_ETHEREUM_WEBSOCKET_URL). See internal/config for defaults.
+
+debug: true
+sentry_dsn: ""
+
+server:
+  host: 0.0.0.0
+  port: 8545
+  read_timeout: 30s
+  write_timeout: 120s   # a 100k-log response takes a while to encode
+  idle_timeout: 120s
+
+database:
+  host: localhost
+  port: 5432
+  user: postgres
+  password: postgres
+  dbname: ff_eth_logs
+  sslmode: disable
+  max_conns: 16
+
+ethereum:
+  websocket_url: ""      # required when ingestion_enabled; newHeads + eth_getLogs on one connection
+  chain_id: 1
+  ingestion_enabled: true
+  start_block: 0         # where an empty warehouse starts; refused once a cursor exists (rewind instead)
+  confirmation_blocks: 2 # blocks are written this far behind the tip; the reorg strategy
+  max_catchup_blocks: 50000
+  getlogs_span_cap: 10000 # provider eth_getLogs block-range cap (Chainstack 10100, Infura 10000)
+  head_timeout: 5m       # exit when no newHeads notification arrives for this long (half-open socket); 0 disables
+  rpc_timeout: 60s       # deadline per provider RPC attempt; retried within the 5-minute budget, then fatal
+
+rpc:
+  max_results: 100000    # eth_getLogs responses above this return "query returned more than N results"
+  query_timeout: 60s
