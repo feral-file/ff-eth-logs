@@ -192,7 +192,7 @@ docker compose run --rm ff-eth-logs backfill -config config.yaml -dir /data/v1
 docker compose start ff-eth-logs                      # resumes at the published head + 1
 ```
 
-`make backfill DIR=/data/v1` does the same against the dev compose stack. The stages take the warehouse writer lock (`ingest`/`backfill` are mutually exclusive: `another writer holds the warehouse (serve ingestion or a backfill stage is running)`), operate only inside the manifest's block interval — rows the tail wrote above the export end are neither counted, deleted nor verified — and `finish` merges its verified interval into the existing coverage rather than lowering a head the tail has moved past.
+`make backfill DIR=/data/v1` does the same against the dev compose stack. While the backfill runs, API reads — including on an API-only replica (`ethereum.ingestion_enabled=false`) sharing the database — are refused with `out of warehouse scope: warehouse is under maintenance (a backfill is reloading it); ask a node` and `/health` returns `503 {"status":"maintenance"}`: the backfill holds the maintenance lock exclusively and every read snapshot takes it shared. The stages take the warehouse writer lock (`ingest`/`backfill` are mutually exclusive: `another writer holds the warehouse (serve ingestion or a backfill stage is running)`), operate only inside the manifest's block interval — rows the tail wrote above the export end are neither counted, deleted nor verified — and `finish` merges its verified interval into the existing coverage rather than lowering a head the tail has moved past.
 
 ## 9. Re-exporting from BigQuery
 

@@ -32,8 +32,8 @@ func TestWriteRangeCursorAndRewind(t *testing.T) {
 	assert.False(t, ok)
 
 	logs := []types.Log{
-		{BlockNumber: 11, Index: 0, Address: common.HexToAddress("0x1"), Topics: []common.Hash{common.HexToHash("0xa")}, Data: nil, TxHash: common.HexToHash("0xf1")},
-		{BlockNumber: 12, Index: 3, Address: common.HexToAddress("0x2"), Topics: []common.Hash{common.HexToHash("0xa"), common.HexToHash("0xb")}, Data: []byte{1, 2}, TxHash: common.HexToHash("0xf2"), TxIndex: 7},
+		{BlockNumber: 11, Index: 0, Address: common.HexToAddress("0x1"), Topics: []common.Hash{common.HexToHash("0xa")}, Data: nil, TxHash: common.HexToHash("0xf1"), BlockHash: blockAt(11).Hash},
+		{BlockNumber: 12, Index: 3, Address: common.HexToAddress("0x2"), Topics: []common.Hash{common.HexToHash("0xa"), common.HexToHash("0xb")}, Data: []byte{1, 2}, TxHash: common.HexToHash("0xf2"), TxIndex: 7, BlockHash: blockAt(12).Hash},
 	}
 	require.NoError(t, s.WriteRange(ctx, 10, 12, []Block{blockAt(10), blockAt(11), blockAt(12)}, logs))
 	head, ok, err := s.Cursor(ctx)
@@ -225,8 +225,8 @@ func TestWriteRangeCreatesPartitionOnRollover(t *testing.T) {
 
 	from, to := uint64(39_999_999), uint64(40_000_001)
 	logs := []types.Log{
-		{BlockNumber: 39_999_999, Address: common.HexToAddress("0x1"), Topics: []common.Hash{common.HexToHash("0xa")}, Data: []byte{}},
-		{BlockNumber: 40_000_000, Address: common.HexToAddress("0x1"), Topics: []common.Hash{common.HexToHash("0xa")}, Data: []byte{}},
+		{BlockNumber: 39_999_999, Address: common.HexToAddress("0x1"), Topics: []common.Hash{common.HexToHash("0xa")}, Data: []byte{}, BlockHash: blockAt(39_999_999).Hash},
+		{BlockNumber: 40_000_000, Address: common.HexToAddress("0x1"), Topics: []common.Hash{common.HexToHash("0xa")}, Data: []byte{}, BlockHash: blockAt(40_000_000).Hash},
 	}
 	require.NoError(t, s.WriteRange(ctx, from, to, blocksFor(from, to), logs))
 
@@ -256,8 +256,8 @@ func TestReadSnapshotSurvivesConcurrentRewind(t *testing.T) {
 	ctx := context.Background()
 	s := NewFromPool(testdb.Open(t))
 	logs := []types.Log{
-		{BlockNumber: 10, Address: common.HexToAddress("0x1"), Topics: []common.Hash{common.HexToHash("0xa")}, Data: []byte{}},
-		{BlockNumber: 12, Address: common.HexToAddress("0x1"), Topics: []common.Hash{common.HexToHash("0xa")}, Data: []byte{}},
+		{BlockNumber: 10, Address: common.HexToAddress("0x1"), Topics: []common.Hash{common.HexToHash("0xa")}, Data: []byte{}, BlockHash: blockAt(10).Hash},
+		{BlockNumber: 12, Address: common.HexToAddress("0x1"), Topics: []common.Hash{common.HexToHash("0xa")}, Data: []byte{}, BlockHash: blockAt(12).Hash},
 	}
 	require.NoError(t, s.WriteRange(ctx, 10, 12, blocksFor(10, 12), logs))
 
@@ -294,6 +294,9 @@ func TestWriteRangeRefusesLogsFromAnotherBlock(t *testing.T) {
 	l := types.Log{BlockNumber: 10, Address: common.HexToAddress("0x1"), Topics: []common.Hash{common.HexToHash("0xa")}, Data: []byte{}, BlockHash: common.HexToHash("0xbad")}
 	err := s.WriteRange(ctx, 10, 10, []Block{blockAt(10)}, []types.Log{l})
 	require.ErrorContains(t, err, "log at block 10 carries block hash")
+	l.BlockHash = common.Hash{}
+	err = s.WriteRange(ctx, 10, 10, []Block{blockAt(10)}, []types.Log{l})
+	require.ErrorContains(t, err, "carries no block hash; unverifiable logs are not stored")
 	_, ok, err := s.Coverage(ctx)
 	require.NoError(t, err)
 	assert.False(t, ok, "nothing was written")
@@ -382,4 +385,20 @@ func TestSetCoverageMergesWithTailProgress(t *testing.T) {
 	cov, _, _ = s.Coverage(ctx)
 	assert.Equal(t, Coverage{Start: 5, Head: 25}, cov)
 	assert.ErrorIs(t, s.SetCoverage(ctx, Coverage{Start: 40, Head: 50}), ErrCoverageGap)
+}
+
+// TestMaintenanceLockRefusesReaders pins the backfill/reader exclusion: while
+// a backfill holds the maintenance lock, a read snapshot is refused with
+// ErrMaintenance; readers holding the shared lock delay the backfill's
+// acquisition rather than being served a half-reloaded warehouse.
+func TestMaintenanceLockRefusesReaders(t *testing.T) {
+	ctx := context.Background()
+	s := NewFromPool(testdb.Open(t))
+	require.NoError(t, s.WriteRange(ctx, 1, 1, blocksFor(1, 1), nil))
+	release, err := s.AcquireMaintenanceLock(ctx)
+	require.NoError(t, err)
+	err = s.Read(ctx, func(v View) error { _, _, err := v.Coverage(ctx); return err })
+	require.ErrorIs(t, err, ErrMaintenance)
+	release()
+	require.NoError(t, s.Read(ctx, func(v View) error { _, _, err := v.Coverage(ctx); return err }))
 }

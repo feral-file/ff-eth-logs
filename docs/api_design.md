@@ -5,7 +5,7 @@ Rules for the FF Eth Logs JSON-RPC surface. The normative contract is the code i
 ## 1. Transport
 
 - **`POST /`** — JSON-RPC 2.0 over HTTP. Requests are handled by go-ethereum's `rpc.Server` (v1.16.5), so framing, batch requests (a JSON array of requests), parameter decoding and the standard error codes are geth's own: `-32700` parse error, `-32600` invalid request, `-32601` `the method <name> does not exist/is not available`, `-32602` `invalid argument <i>: <reason>` for a parameter that fails to decode.
-- **`GET /health`** — JSON `{"status":"ok","head":<uint64>,"coverage_start":<uint64>,"empty":<bool>,"chain_id":<uint64>}`; `503` with `{"status":"error","error":"..."}` when the database does not answer — including when it does not answer within `rpc.query_timeout`, which bounds this read and the `eth_blockNumber` read like any `eth_getLogs` query. `head` and `coverage_start` are the covered interval, `empty` is true before the first write or backfill `finish`.
+- **`GET /health`** — JSON `{"status":"ok","head":<uint64>,"coverage_start":<uint64>,"empty":<bool>,"chain_id":<uint64>}`; `503` with `{"status":"error","error":"..."}` when the database does not answer — including when it does not answer within `rpc.query_timeout`, which bounds this read and the `eth_blockNumber` read like any `eth_getLogs` query — and `503` with `{"status":"maintenance",…}` while a backfill holds the warehouse (every read snapshot takes the maintenance lock shared; a backfill holds it exclusively, so reads refuse instead of seeing partitions mid-reload). `head` and `coverage_start` are the covered interval, `empty` is true before the first write or backfill `finish`.
 - No authentication, no TLS: private network only (see [constraints](constraints.md)).
 - Timeouts: `server.read_timeout` 30 s, `server.write_timeout` 120 s, `rpc.query_timeout` 60 s per database query.
 
@@ -51,6 +51,7 @@ Resolution follows geth's `GetLogs` / `Filter.Logs` order of checks, then bounds
 | both bounds explicit numbers and `fromBlock > toBlock` | `-32000 invalid block range params` |
 | any other negative number | `-32000 negative block number` |
 | `fromBlock > toBlock` after tag resolution (e.g. `fromBlock: "latest"` with an explicit lower `toBlock`) | `[]` |
+| a backfill is reloading the warehouse (any range) | `-32000 out of warehouse scope: warehouse is under maintenance (a backfill is reloading it); ask a node` |
 | either bound above the head | `-32000 out of warehouse scope: blocks A-B extend above the warehouse head H` |
 | `fromBlock` below the coverage start (a warehouse that holds only a tail, or a partially loaded one, never answers history it did not load) | `-32000 out of warehouse scope: blocks A-B extend below the warehouse coverage start S` |
 

@@ -58,6 +58,16 @@ func (s *Store) Read(ctx context.Context, fn func(View) error) error {
 		return fmt.Errorf("begin read snapshot: %w", err)
 	}
 	defer rollback(tx)
+	// Shared, transaction-scoped: released with the snapshot. A backfill
+	// holding the exclusive maintenance lock makes this fail, so the read is
+	// refused rather than served from partitions mid-reload.
+	var admitted bool
+	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock_shared($1)`, maintenanceLockKey).Scan(&admitted); err != nil {
+		return fmt.Errorf("maintenance check: %w", err)
+	}
+	if !admitted {
+		return ErrMaintenance
+	}
 	if err := fn(snapshot{q: tx}); err != nil {
 		return err
 	}

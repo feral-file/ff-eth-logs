@@ -184,7 +184,7 @@ func logsMatchBlocks(logs []types.Log, blocks []Block) error {
 	for i := range logs {
 		l := &logs[i]
 		if l.BlockHash == (common.Hash{}) {
-			continue
+			return fmt.Errorf("log at block %d index %d carries no block hash; unverifiable logs are not stored", l.BlockNumber, l.Index)
 		}
 		h, ok := byNumber[l.BlockNumber]
 		if !ok {
@@ -297,6 +297,48 @@ const writerLockKey = 0x66665f6574685f6c // "ff_eth_l"
 // ErrWriterBusy is returned when another writer (serve's ingestion or a
 // backfill) holds the warehouse.
 var ErrWriterBusy = errors.New("another writer holds the warehouse (serve ingestion or a backfill stage is running)")
+
+// maintenanceLockKey is held exclusively by a backfill for its whole run and
+// taken shared by every API read snapshot: a backfill reloads partitions one
+// transaction at a time while the published coverage still authorizes the
+// interval, so a reader in between would see a mix of old and new
+// partitions. Readers refuse instead (ErrMaintenance).
+const maintenanceLockKey = 0x66665f6574685f6d // "ff_eth_m"
+
+// ErrMaintenance is returned to a reader while a backfill holds the warehouse.
+var ErrMaintenance = errors.New("warehouse is under maintenance (a backfill is reloading it)")
+
+// AcquireMaintenanceLock excludes API readers for the duration of a backfill.
+// It waits briefly for in-flight reads (which hold the lock shared for one
+// snapshot) to finish rather than failing on the first try.
+func (s *Store) AcquireMaintenanceLock(ctx context.Context) (func(), error) {
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire connection for maintenance lock: %w", err)
+	}
+	deadline := time.Now().Add(rollbackTimeout)
+	for {
+		var got bool
+		if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, maintenanceLockKey).Scan(&got); err != nil {
+			conn.Release()
+			return nil, fmt.Errorf("maintenance lock: %w", err)
+		}
+		if got {
+			break
+		}
+		if time.Now().After(deadline) {
+			conn.Release()
+			return nil, errors.New("maintenance lock: readers did not drain in time")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return func() {
+		unlockCtx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
+		defer cancel()
+		_, _ = conn.Exec(unlockCtx, `SELECT pg_advisory_unlock($1)`, maintenanceLockKey)
+		conn.Release()
+	}, nil
+}
 
 // AcquireWriterLock takes the session-level advisory lock on a dedicated
 // connection and returns its release. Reason: the backfill deletes and

@@ -49,7 +49,7 @@ func TestDSNEscapesCredentials(t *testing.T) {
 
 func TestValidate(t *testing.T) {
 	base := func() *Config {
-		return &Config{Database: DatabaseConfig{Host: "h"}, Ethereum: EthereumConfig{WebSocketURL: "wss://x", ChainID: 1, IngestionEnabled: true, ConfirmationBlocks: 2, MaxCatchupBlocks: 100}, RPC: RPCConfig{QueryTimeout: time.Second}}
+		return &Config{Database: DatabaseConfig{Host: "h", MaxConns: 2}, Ethereum: EthereumConfig{WebSocketURL: "wss://x", ChainID: 1, IngestionEnabled: true, ConfirmationBlocks: 2, MaxCatchupBlocks: 100}, RPC: RPCConfig{QueryTimeout: time.Second}}
 	}
 	require.NoError(t, Validate(base()))
 
@@ -76,6 +76,10 @@ func TestValidate(t *testing.T) {
 	c = base()
 	c.RPC.MaxResults = -1
 	assert.ErrorContains(t, Validate(c), "max_results")
+
+	c = base()
+	c.Database.MaxConns = 1
+	assert.ErrorContains(t, Validate(c), "database.max_conns must be >= 2")
 
 	for _, d := range []time.Duration{0, -time.Second} {
 		c = base()

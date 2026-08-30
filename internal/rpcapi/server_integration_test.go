@@ -33,9 +33,9 @@ func TestServerRoundTripWithEthclient(t *testing.T) {
 	owner := common.HexToHash("0x00000000000000000000000000000000000000000000000000000000000000ee")
 	blocks := []logstore.Block{{Number: 5, Hash: common.HexToHash("0x55"), Timestamp: 1000}, {Number: 6, Hash: common.HexToHash("0x66"), Timestamp: 1012}}
 	logs := []types.Log{
-		{BlockNumber: 5, Index: 1, Address: common.HexToAddress("0xc0"), Topics: []common.Hash{eventset.Transfer, common.HexToHash("0x1"), owner, common.HexToHash("0x9")}, Data: []byte{}, TxHash: common.HexToHash("0xf5"), TxIndex: 2},
-		{BlockNumber: 6, Index: 0, Address: common.HexToAddress("0xc0"), Topics: []common.Hash{eventset.Transfer, owner, common.HexToHash("0x2")}, Data: []byte{}, TxHash: common.HexToHash("0xf6")},
-		{BlockNumber: 6, Index: 1, Address: common.HexToAddress("0xc0"), Topics: []common.Hash{eventset.Transfer, common.HexToHash("0x3"), common.HexToHash("0x4"), common.HexToHash("0x9")}, Data: []byte{}, TxHash: common.HexToHash("0xf7")},
+		{BlockNumber: 5, Index: 1, Address: common.HexToAddress("0xc0"), Topics: []common.Hash{eventset.Transfer, common.HexToHash("0x1"), owner, common.HexToHash("0x9")}, Data: []byte{}, TxHash: common.HexToHash("0xf5"), TxIndex: 2, BlockHash: common.HexToHash("0x55")},
+		{BlockNumber: 6, Index: 0, Address: common.HexToAddress("0xc0"), Topics: []common.Hash{eventset.Transfer, owner, common.HexToHash("0x2")}, Data: []byte{}, TxHash: common.HexToHash("0xf6"), BlockHash: common.HexToHash("0x66")},
+		{BlockNumber: 6, Index: 1, Address: common.HexToAddress("0xc0"), Topics: []common.Hash{eventset.Transfer, common.HexToHash("0x3"), common.HexToHash("0x4"), common.HexToHash("0x9")}, Data: []byte{}, TxHash: common.HexToHash("0xf7"), BlockHash: common.HexToHash("0x66")},
 	}
 	require.NoError(t, store.WriteRange(ctx, 5, 6, blocks, logs))
 
@@ -61,7 +61,7 @@ func TestServerRoundTripWithEthclient(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	want := logs[0]
-	want.BlockHash, want.BlockTimestamp = blocks[0].Hash, blocks[0].Timestamp
+	want.BlockTimestamp = blocks[0].Timestamp
 	assert.Equal(t, want, got[0])
 
 	// Wildcard positions impose nothing (vendor semantics): the 3-topic log
@@ -121,6 +121,19 @@ func TestServerRoundTripWithEthclient(t *testing.T) {
 	require.NoError(t, raw.BatchCallContext(ctx, batch))
 	assert.Equal(t, "0x6", *batch[0].Result.(*string))
 	assert.Equal(t, "0x1", *batch[1].Result.(*string))
+
+	// Under maintenance (a backfill holds the lock) reads are refused with a
+	// scope error and /health reports it.
+	releaseMaint, err := store.AcquireMaintenanceLock(ctx)
+	require.NoError(t, err)
+	_, err = client.FilterLogs(ctx, ethereum.FilterQuery{FromBlock: big.NewInt(5), ToBlock: big.NewInt(6), Topics: [][]common.Hash{{eventset.Transfer}, nil, nil, {common.HexToHash("0x9")}}})
+	require.ErrorAs(t, err, &rpcErr)
+	assert.Equal(t, "out of warehouse scope: warehouse is under maintenance (a backfill is reloading it); ask a node", rpcErr.Error())
+	mresp, err := http.Get(ts.URL + "/health")
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusServiceUnavailable, mresp.StatusCode)
+	_ = mresp.Body.Close()
+	releaseMaint()
 
 	// Health page.
 	resp, err := http.Get(ts.URL + "/health")

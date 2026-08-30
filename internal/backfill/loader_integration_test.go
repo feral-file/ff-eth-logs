@@ -276,7 +276,7 @@ func TestLoaderEndToEnd(t *testing.T) {
 	// The tail then advances past the export end inside the same physical
 	// partition (part=001). A later logs/blocks/finish rerun must neither
 	// count, delete nor verify those rows, and must not lower the head.
-	tailLog := types.Log{BlockNumber: 1_000_006, Address: common.HexToAddress("0x9"), Topics: []common.Hash{common.HexToHash("0xa")}, Data: []byte{}}
+	tailLog := types.Log{BlockNumber: 1_000_006, Address: common.HexToAddress("0x9"), Topics: []common.Hash{common.HexToHash("0xa")}, Data: []byte{}, BlockHash: common.BigToHash(big.NewInt(1_000_006))}
 	require.NoError(t, store.WriteRange(ctx, 1_000_006, 1_000_008, tailBlocks(1_000_006, 1_000_008), []types.Log{tailLog}))
 	require.NoError(t, l.Logs(ctx))
 	require.NoError(t, l.Blocks(ctx))

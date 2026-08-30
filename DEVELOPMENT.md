@@ -60,7 +60,7 @@ The binary supports **dual configuration**: a YAML file and `FF_ETH_LOGS_*` envi
 | `database.password` | `""` | |
 | `database.dbname` | `ff_eth_logs` | |
 | `database.sslmode` | `disable` | |
-| `database.max_conns` | `16` | pgx pool size |
+| `database.max_conns` (must be ≥ 2: one connection holds the writer lock for the lifetime of ingestion / a backfill stage / a rewind) | `16` | pgx pool size |
 | `ethereum.websocket_url` | — | **Required when `ingestion_enabled`**; `newHeads` + `eth_getLogs` on one connection |
 | `ethereum.chain_id` | `1` | Must be `1`: the warehouse is mainnet-only (no chain column in the schema); the provider must report it via `eth_chainId` |
 | `ethereum.ingestion_enabled` | `true` | `false` serves the stored head only (API-only replica) |

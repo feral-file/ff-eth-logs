@@ -113,7 +113,16 @@ func (a *API) coverage(ctx context.Context) (logstore.Coverage, error) {
 		cov = c
 		return nil
 	})
-	return cov, err
+	return cov, scopeIfMaintenance(err)
+}
+
+// scopeIfMaintenance turns the store's maintenance refusal into the scope
+// error a routing client falls through on.
+func scopeIfMaintenance(err error) error {
+	if errors.Is(err, logstore.ErrMaintenance) {
+		return &ScopeError{Reason: "warehouse is under maintenance (a backfill is reloading it); ask a node"}
+	}
+	return err
 }
 
 // GetLogs implements eth_getLogs with go-ethereum's semantics on the stored
@@ -154,7 +163,7 @@ func (a *API) GetLogs(ctx context.Context, crit FilterCriteria) ([]*types.Log, e
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, scopeIfMaintenance(err)
 	}
 	return out, nil
 }

@@ -93,6 +93,11 @@ func (a *API) health(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	w.Header().Set("Content-Type", "application/json")
+	if errors.Is(err, logstore.ErrMaintenance) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "maintenance", "error": err.Error()})
+		return
+	}
 	if err != nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "error", "error": err.Error()})

@@ -135,10 +135,11 @@ type sinkCall struct {
 // call's ordinal (push more heads, cancel the run, fail the write), which is
 // how tests script what happens between confirmed batches.
 type fakeSink struct {
-	calls   []sinkCall
-	steps   []func(from, to uint64) error
-	stored  map[uint64]common.Hash // block hashes the warehouse holds (seeded + written)
-	rewinds []uint64
+	calls    []sinkCall
+	steps    []func(from, to uint64) error
+	stored   map[uint64]common.Hash // block hashes the warehouse holds (seeded + written)
+	rewinds  []uint64
+	onRewind func(to uint64) // runs after each rewind, on the subscriber's goroutine (e.g. to deliver the head that replans the range)
 }
 
 func (s *fakeSink) WriteRange(_ context.Context, from, to uint64, blocks []logstore.Block, logs []types.Log) error {
@@ -166,6 +167,9 @@ func (s *fakeSink) Rewind(_ context.Context, to uint64) error {
 		if n > to {
 			delete(s.stored, n)
 		}
+	}
+	if s.onRewind != nil {
+		s.onRewind(to)
 	}
 	return nil
 }
@@ -263,7 +267,10 @@ func (f *fixture) expectLogs(from, to uint64, logs ...types.Log) *gomock.Call {
 	return f.client.EXPECT().FilterLogs(gomock.Any(), logsFor(from, to)).Return(logs, nil)
 }
 
-// serveLogs answers any eth_getLogs query with the logs of the blocks it covers.
+// serveLogs answers any eth_getLogs query with the logs of the blocks it
+// covers. Every log must carry the hash of its block (build it with logAt):
+// a log without one is unverifiable and makes the subscriber refetch the
+// batch until it gives up.
 func (f *fixture) serveLogs(byBlock map[uint64][]types.Log) {
 	f.client.EXPECT().FilterLogs(gomock.Any(), gomock.Any()).AnyTimes().
 		DoAndReturn(func(_ context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
@@ -326,12 +333,24 @@ func inOrder(calls ...*gomock.Call) {
 	gomock.InOrder(args...)
 }
 
+// transferLog builds a warehouse-shaped log without a block hash: the
+// shape a provider that omits blockHash returns, which the subscriber must
+// refuse to commit. Logs a test expects to be written come from logAt.
 func transferLog(block uint64, index uint) types.Log {
 	return types.Log{
 		BlockNumber: block,
 		Index:       index,
 		Topics:      []common.Hash{eventset.Transfer, {}, {}, {}},
 	}
+}
+
+// logAt builds a warehouse-shaped log for the block h, carrying its hash the
+// way a real eth_getLogs answer does — the hash the subscriber checks against
+// the metadata it holds for that height.
+func logAt(h *chain.BlockHead, index uint) types.Log {
+	l := transferLog(uint64(h.Number), index)
+	l.BlockHash = h.Hash
+	return l
 }
 
 func blockOf(h *chain.BlockHead) logstore.Block {
@@ -353,7 +372,7 @@ func TestRun_WritesEachHeadBlock(t *testing.T) {
 	defer cancel()
 
 	h101 := c.next(101)
-	log100, log101 := transferLog(100, 3), transferLog(101, 0)
+	log100, log101 := logAt(h100, 3), logAt(h101, 0)
 	inOrder(
 		f.expectHead(99, anchor), // resume point anchored first
 		f.expectLogs(100, 100, log100),
@@ -413,7 +432,7 @@ func TestRun_CatchupIsBatched(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	log105, log115 := transferLog(105, 0), transferLog(115, 0)
+	log105, log115 := logAt(c.canonical(105), 0), logAt(c.canonical(115), 0)
 	inOrder(
 		f.expectLogs(100, 109, log105),
 		f.expectLogs(110, 119, log115),
@@ -483,12 +502,14 @@ func TestRun_KeepsOnlyWarehouseShapedLogs(t *testing.T) {
 
 	c := &headChain{}
 	anchor := c.anchor(100)
-	f := newFixture(t, c.next(100))
+	h100 := c.next(100)
+	f := newFixture(t, h100)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	erc20 := types.Log{BlockNumber: 100, Index: 0, Topics: []common.Hash{eventset.Transfer, {}, {}}}
-	erc721 := transferLog(100, 1)
+	// Both are raw logs of block 100, so both carry its hash; only the shape differs.
+	erc20 := types.Log{BlockNumber: 100, BlockHash: h100.Hash, Index: 0, Topics: []common.Hash{eventset.Transfer, {}, {}}}
+	erc721 := logAt(h100, 1)
 	f.expectHead(99, anchor)
 	f.expectLogs(100, 100, erc20, erc721)
 	f.sink.steps = []func(uint64, uint64) error{thenCancel(cancel)}
@@ -588,7 +609,7 @@ func TestRun_SinkErrorStops(t *testing.T) {
 	c.extend(104)
 	f := newFixture(t, c.next(105))
 
-	log103 := transferLog(103, 0)
+	log103 := logAt(c.canonical(103), 0)
 	inOrder(f.expectLogs(100, 105, log103), f.expectLogs(106, 106))
 	f.serveHeads(c)
 	sinkErr := errors.New("database closed")

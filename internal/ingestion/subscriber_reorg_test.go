@@ -682,14 +682,6 @@ func TestRun_StartupStaleHighHeadCannotShortenLag(t *testing.T) {
 	require.Equal(t, []logstore.Block{blockOf(a100)}, f.sink.calls[0].Blocks, "100 is written from the canonical head")
 }
 
-// logAt builds a warehouse-shaped log for the block h, carrying its hash the
-// way a real eth_getLogs answer does.
-func logAt(h *chain.BlockHead) types.Log {
-	l := transferLog(uint64(h.Number), 0)
-	l.BlockHash = h.Hash
-	return l
-}
-
 // TestRun_BatchRefetchedWhenLogsDisagreeWithHeaders pins the guard against a
 // reorg between the metadata and the log fetch: the logs for 100 carry a
 // block hash the retained head does not, so the retained head is dropped,
@@ -707,10 +699,10 @@ func TestRun_BatchRefetchedWhenLogsDisagreeWithHeaders(t *testing.T) {
 	canonical100 := head(100, common.HexToHash("0xc100"), stale100.ParentHash) // what the node holds by the time logs are fetched
 	inOrder(
 		f.expectHead(99, anchor),
-		f.expectLogs(100, 100, logAt(canonical100)), // logs already come from the new block
+		f.expectLogs(100, 100, logAt(canonical100, 0)), // logs already come from the new block
 		// disagreement → retained 100 dropped; the batch starts over: 100 refetched canonical, then the logs again
 		f.expectHead(100, canonical100),
-		f.expectLogs(100, 100, logAt(canonical100)),
+		f.expectLogs(100, 100, logAt(canonical100, 0)),
 	)
 	f.sink.steps = []func(uint64, uint64) error{thenCancel(cancel)}
 
@@ -744,7 +736,7 @@ func TestRun_BatchRefetchedWhenLoglessBlockMovedDuringFetch(t *testing.T) {
 		f.expectHead(100, b100), // the post-fetch re-read: 100 moved to B
 		// retained A100 dropped; the batch starts over with B100 as metadata
 		f.expectHead(100, b100),
-		f.expectLogs(100, 100, logAt(b100)), // branch B has the event
+		f.expectLogs(100, 100, logAt(b100, 0)), // branch B has the event
 	)
 	f.sink.steps = []func(uint64, uint64) error{thenCancel(cancel)}
 
@@ -773,6 +765,35 @@ func TestRun_BatchGivesUpWhenChainKeepsMoving(t *testing.T) {
 	err := f.run(context.Background(), ingestion.Config{}, 100)
 	require.ErrorContains(t, err, "kept changing between log and header fetches for batch 100-100 (3 attempts)")
 	require.Empty(t, f.sink.calls)
+}
+
+// TestRun_LogWithoutBlockHashIsNeverCommitted pins that a log whose
+// blockHash is missing (zero) is unverifiable and never committed on trust:
+// it counts as a disagreement, so the retained head for its height is
+// dropped and refetched canonical and the batch is fetched again — and when
+// the provider keeps omitting it, the run fails after the retry budget with
+// nothing written.
+func TestRun_LogWithoutBlockHashIsNeverCommitted(t *testing.T) {
+	t.Parallel()
+
+	c := &headChain{}
+	anchor := c.anchor(100)
+	h100 := c.next(100)
+	f := newFixture(t, h100)
+	bare := transferLog(100, 0) // no BlockHash
+	inOrder(
+		f.expectHead(99, anchor),
+		f.expectLogs(100, 100, bare), // attempt 1: metadata from the retained head, log unverifiable
+		f.expectHead(100, h100),      // retained 100 dropped: refetched canonical (unchanged)
+		f.expectLogs(100, 100, bare), // attempt 2: still no hash
+		f.expectHead(100, h100),
+		f.expectLogs(100, 100, bare), // attempt 3: give up
+	)
+
+	err := f.run(context.Background(), ingestion.Config{}, 100)
+	require.ErrorContains(t, err, "blocks [100] kept changing between log and header fetches for batch 100-100 (3 attempts)")
+	require.Empty(t, f.sink.calls, "a log without a block hash is never written")
+	require.Empty(t, f.sink.rewinds)
 }
 
 // chainServer answers HeadByNumber from a headChain, with per-height
@@ -911,12 +932,7 @@ func TestRun_BatchBoundaryDiscontinuityRewinds(t *testing.T) {
 	f.sink.steps = []func(uint64, uint64) error{thenCancel(cancel)}
 	// After the rewind nothing is queued; deliver the far head again so the
 	// range is replanned from 100.
-	go func() {
-		for len(f.sink.rewinds) == 0 {
-			time.Sleep(5 * time.Millisecond)
-		}
-		f.push(far)
-	}()
+	f.sink.onRewind = func(uint64) { f.push(far) }
 
 	err := f.run(ctx, ingestion.Config{}, 101)
 	require.ErrorIs(t, err, context.Canceled)
@@ -1024,12 +1040,9 @@ func TestRun_BoundaryReorgInLaterBatchUsesDurableHead(t *testing.T) {
 	srv.install(f)
 	f.serveLogs(nil)
 	f.sink.steps = []func(uint64, uint64) error{nil, thenCancel(cancel)}
-	go func() {
-		for len(f.sink.rewinds) == 0 {
-			time.Sleep(5 * time.Millisecond)
-		}
-		f.push(reorged.canonical(300))
-	}()
+	// After the rewind nothing is queued; deliver the new chain's tip so the
+	// range is replanned from 109.
+	f.sink.onRewind = func(uint64) { f.push(reorged.canonical(300)) }
 
 	err := f.run(ctx, ingestion.Config{}, 100)
 	require.ErrorIs(t, err, context.Canceled)

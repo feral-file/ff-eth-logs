@@ -647,9 +647,9 @@ const batchConsistencyAttempts = 3
 // every block that returned no raw log is re-read from the node after the
 // log fetch and must still carry the metadata hash. Otherwise the retained
 // heads for the disagreeing heights are dropped (refetched canonical) and
-// the whole batch is fetched again. Trade-offs: a provider that omits
-// blockHash cannot be verified through its logs (the zero hash is skipped);
-// mainnet providers always populate it.
+// the whole batch is fetched again. A log without a blockHash is
+// unverifiable and treated as a disagreement: the batch is refetched and,
+// if the provider keeps omitting it, fails — never committed on trust.
 func (s *Subscriber) ingestBatch(ctx context.Context, st *streamState, from, to uint64) error {
 	for attempt := 1; ; attempt++ {
 		// Metadata first: it is the chain version the batch is committed to,
@@ -779,10 +779,10 @@ func disagreeingHeights(logs []types.Log, blocks []logstore.Block) []uint64 {
 	seen := map[uint64]struct{}{}
 	var out []uint64
 	for _, l := range logs {
-		if l.BlockHash == (common.Hash{}) {
-			continue
-		}
-		if h, ok := byNumber[l.BlockNumber]; ok && h != l.BlockHash {
+		// A zero blockHash cannot be verified against anything; treat it as a
+		// disagreement so the batch is refetched (and fails after the retry
+		// budget) rather than committed on trust.
+		if h, ok := byNumber[l.BlockNumber]; ok && (l.BlockHash == (common.Hash{}) || h != l.BlockHash) {
 			if _, dup := seen[l.BlockNumber]; !dup {
 				seen[l.BlockNumber] = struct{}{}
 				out = append(out, l.BlockNumber)
