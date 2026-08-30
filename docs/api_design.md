@@ -102,7 +102,7 @@ An array of go-ethereum `types.Log` objects, `[]` (never `null`) when nothing ma
 
 - `blockHash` and `blockTimestamp` come from `eth_blocks`; `blockTimestamp` is always present, so a client needs no `eth_getBlockByNumber` for timestamps.
 - `removed` is always `false`: only confirmed blocks are stored.
-- `data` is `0x` for ERC-721 `Transfer`.
+- `data` is `0x` for the 4-topic ERC-721 `Transfer`; the retained CryptoPunks 3-topic internal `Transfer(seller, buyer, 1)` carries its unindexed `uint256` value as 32-byte ABI-encoded `data` (the vendor returns it the same way).
 
 ### 3.6 Result cap
 
