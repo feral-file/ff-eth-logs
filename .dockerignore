@@ -73,9 +73,12 @@ temp/
 *.db
 *.sqlite
 *.sql
-db/
+# db/* (not db/) keeps the directory itself traversable, so the re-includes
+# below work with the classic builder too, not only with BuildKit.
+db/*
 !db/init_pg_db.sql
 !db/migrations/
+!db/migrations/*.sql
 
 # Parquet exports and local data volumes (backfill inputs are mounted, not baked in)
 *.parquet
