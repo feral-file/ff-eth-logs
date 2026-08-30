@@ -66,11 +66,16 @@ tmp/
 temp/
 *.tmp
 
-# Local database files. db/ itself stays in the context: the runtime image
-# ships db/ so the deployment applies the schema the pinned image was built
-# against.
+# Local database files and dumps stay out of the context (COPY . . would put
+# them in the builder stage and remote build caches). Only the tracked schema
+# is re-included: the runtime image ships it so a deployment applies the
+# schema the pinned image was built against.
 *.db
 *.sqlite
+*.sql
+db/
+!db/init_pg_db.sql
+!db/migrations/
 
 # Parquet exports and local data volumes (backfill inputs are mounted, not baked in)
 *.parquet

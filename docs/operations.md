@@ -6,13 +6,13 @@ Runbook for **FF Eth Logs**: first deployment, the backfill, reorg and catch-up 
 
 ### 1.1 Create the database
 
-Apply the schema once, on the empty database the service will use:
+Apply the schema to the database the service will use:
 
 ```bash
 psql -h <db-host> -U postgres -d ff_eth_logs -f db/init_pg_db.sql
 ```
 
-(With ff-deploy the PostgreSQL container mounts the file as its init script.) The script is idempotent. Provision **≈ 250 GB** of disk: the load ends at ≈ 205 GB and grows ≈ 1.5 GB/month.
+The script is idempotent (`IF NOT EXISTS` throughout). ff-deploy does this on **every** deploy: the image ships `db/` at `/app/db`, and the role extracts `/app/db/init_pg_db.sql` from the pinned image and applies it with `psql -v ON_ERROR_STOP=1` before the service container is (re)created, so the database always matches the binary about to run. Provision **≈ 250 GB** of disk: the load ends at ≈ 205 GB and grows ≈ 1.5 GB/month.
 
 ### 1.2 Copy the export
 
@@ -172,15 +172,16 @@ The indexer keeps working during the rebuild only if its routing client falls ba
 
 The service is deployed by ff-deploy (push the config and image bump to `main` in one commit):
 
-- **Image** `${IMAGE}` (built from `tools/docker/Dockerfile`); the container starts the binary with `-config /app/config.yaml`.
-- **Config** rendered to the host and mounted at `/app/config.yaml`; non-secret keys come from the template, secrets from the environment.
-- **Secrets**: `FF_ETH_LOGS_ETHEREUM_WEBSOCKET_URL` (the Chainstack WebSocket URL with its key — the same endpoint the indexer uses) and `FF_ETH_LOGS_DATABASE_PASSWORD`.
-- **PostgreSQL**: its own container and its own volume (≈ 250 GB), initialised from `db/init_pg_db.sql`; excluded from backups — the GCS export is the DR source.
+- **Image** `registry.digitalocean.com/feral-file/apps:ff-eth-logs-<tag>` (built from `tools/docker/Dockerfile` by the `Build Image` workflow); the container starts the binary with `-config /app/config.yaml`. The image also carries `db/` at `/app/db`.
+- **Config** rendered to the host and mounted at `/app/config.yaml`; every key of `config.yaml.sample` is rendered, secrets included (the file is `0400`, owned by the container user).
+- **Secrets** (ff-deploy vault, `make vault-edit APP=eth_logs`): the Chainstack WebSocket URL with its key — the same endpoint the indexer uses — and the database password.
+- **Schema**: on every deploy the role extracts `/app/db/init_pg_db.sql` from the pinned image and applies it with `psql -v ON_ERROR_STOP=1` (idempotent) after PostgreSQL is ready and before the service container is recreated. A schema change therefore ships in the same image as the code that needs it; if it touches `eth_logs` indexes, stop ingestion for the deploy.
+- **PostgreSQL**: its own container and its own volume (≈ 250 GB); excluded from backups — the GCS export is the DR source.
 - **Network**: both containers on the backend network only; port 8545 is not published outside it (no auth on the endpoint).
 - **Restart policy**: the container must restart on exit — ingestion errors are fatal by design and recovery is "restart from the cursor".
 - **Healthcheck**: `GET /health` returns 200 whenever the database answers, including during catch-up.
 
-Deployment order for a schema change: migration first (with ingestion stopped if it touches `eth_logs` indexes), then the image.
+Deployment order for a schema change is enforced by the role: schema first (from the new image), then the container running that image. Migrations that are not `IF NOT EXISTS`-safe do not exist yet; when one is needed, add it under `db/migrations/` and have the role apply it in order before `init_pg_db.sql` — do not rely on the service to migrate at start-up.
 
 ## 8. Backfill on the deployed host
 

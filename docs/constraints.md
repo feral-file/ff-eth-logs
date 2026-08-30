@@ -55,7 +55,7 @@ Hard and soft constraints for **FF Eth Logs**. Treat these as guardrails when ch
 
 ## 6. Deployment constraints
 
-- **Image plus a mounted config** — the container runs the image with `/app/config.yaml` mounted; environment variables layer on top. env files, `db/` and docs are excluded from the image (`.dockerignore`); the schema is applied by the database container's init mount or by `psql -f`.
+- **Image plus a mounted config** — the container runs the image with `/app/config.yaml` mounted; environment variables layer on top. env files, local SQL dumps and docs are excluded from the image (`.dockerignore`); the tracked schema (`db/init_pg_db.sql`, `db/migrations/`) ships at `/app/db` so the deployment applies exactly the schema the pinned image was built against (`psql -f`, idempotent, every deploy).
 - **Own PostgreSQL container and volume** via ff-deploy — the warehouse is 10–50× the indexer database, is fully reproducible from GCS, and its vacuum/bloat profile must not touch the indexer's `jobs` queue; it is excluded from backups.
 - **PostgreSQL 18, Go 1.25** are the supported baselines (CI runs the integration suite against `postgres:18`).
 - **Schema before code** — run a migration before deploying the binary that depends on it.
