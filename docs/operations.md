@@ -70,7 +70,16 @@ Stages run in order and are each idempotent (`-stage prepare|logs|blocks|finish`
 3. `blocks` — all 4,048 files into `eth_blocks` in one transaction (`Blocks load progress` every 500 files), keeping only rows inside the manifest's `[first, last]` (requires `manifest.json`; see 1.2 on why the blocks export can be longer than the logs extract).
 4. `finish` — verifies the load against `manifest.json` at the export root (section 1.2): `eth_blocks` must be exactly the manifest's interval and row count; every partition the interval implies must exist and hold the manifest's row count both in its Parquet footers and in the database; every listed file must match its recorded size and MD5 and no unlisted Parquet file may be present. Any mismatch is `backfill is not complete, cursor not set: …` and nothing is published. Then it recreates the indexes (`Index ready` per index with `took`), `ANALYZE`, and publishes coverage `[manifest first, manifest last]` (`Backfill finished; coverage published`). Until `finish` succeeds the API reports the warehouse as empty.
 
-**Durations are not yet measured** — record the `took` fields of the first production run here. Session-level PostgreSQL settings that matter: `maintenance_work_mem` for the four index builds over 400 M rows (e.g. `maintenance_work_mem = '2GB'`), `work_mem` for the per-partition sort (anything below the partition size spills to an external sort, which is correct but slower), and enough WAL headroom (`max_wal_size`) for a multi-GB COPY per transaction. Set them in `postgresql.conf` for the load or `ALTER SYSTEM`, and reset afterwards.
+**Measured on the first production run** (2026-08-30, private-prod-01: 2 vCPU / 4 GB, DO block-storage volume, PostgreSQL 18 with `shared_buffers=1GB`, `work_mem=32MB`, `maintenance_work_mem=512MB`, `max_wal_size=4GB`; export v1 = 402,266,375 logs, 25,842,830 blocks):
+
+| Stage | Took | Notes |
+|---|---|---|
+| `logs` | 2 h 01 m | ~55 k rows/s average; the busiest partitions (14: 62 M rows, 15: 65 M) took 22 and 19 min, recent-era partitions ~43 k rows/s (larger rows) |
+| `blocks` | 42 m | starts at ~85 k rows/s and slows to ~5 k rows/s in the last third: `eth_blocks` keeps its `hash` index during the COPY and random inserts into it outgrow the cache — a known cost, accepted because 26 M rows is small |
+| `finish` | 1 h 19 m | verification ≈ 5 min (contiguity, per-partition counts, 16 GB of MD5s); index builds `t1` 18.1 m, `t2` 18.4 m, `t3` 20.2 m, `addr` 15.3 m; `ANALYZE` + publish ≈ 2 min |
+| **total** | **4 h 03 m** | 06:19 → 10:22 UTC, one process, no retries |
+
+Disk after the load: 164 GB database (heap ≈ 110 GB, four secondary indexes ≈ 12 GB each). Memory never exceeded the 2 GB container cap. Session-level PostgreSQL settings that matter: `maintenance_work_mem` for the four index builds over 400 M rows (e.g. `maintenance_work_mem = '2GB'`), `work_mem` for the per-partition sort (anything below the partition size spills to an external sort, which is correct but slower), and enough WAL headroom (`max_wal_size`) for a multi-GB COPY per transaction. Set them in `postgresql.conf` for the load or `ALTER SYSTEM`, and reset afterwards.
 
 A failed stage rolls its transaction back; re-run the same command and it resumes at the first unloaded partition.
 
