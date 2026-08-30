@@ -217,7 +217,7 @@ func Validate(cfg *Config) error {
 		return errors.New("rpc.max_results must be >= 0")
 	}
 	if cfg.Database.MaxConns < 2 {
-		return errors.New("database.max_conns must be >= 2: the writer lock holds one connection for the lifetime of ingestion, a backfill stage or a rewind, and every other operation needs another")
+		return errors.New("database.max_conns must be >= 2: the advisory locks hold one connection for the lifetime of ingestion, a backfill run or a rewind, and every other operation needs another")
 	}
 	if cfg.RPC.QueryTimeout <= 0 {
 		return errors.New("rpc.query_timeout must be > 0: it bounds every warehouse read (eth_getLogs, eth_blockNumber, /health)")

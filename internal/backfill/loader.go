@@ -57,19 +57,12 @@ func New(pool *pgxpool.Pool, dir string) *Loader { return &Loader{pool: pool, di
 // its lifetime, so a backfill against a live service fails immediately
 // with logstore.ErrWriterBusy instead of racing it.
 func (l *Loader) Lock(ctx context.Context) (func(), error) {
-	store := logstore.NewFromPool(l.pool)
-	releaseWriter, err := store.AcquireWriterLock(ctx)
-	if err != nil {
-		return nil, err
-	}
-	// Readers too: an API-only replica takes no writer lock, and a partition
-	// reloaded under a still-published coverage would serve a hybrid history.
-	releaseMaintenance, err := store.AcquireMaintenanceLock(ctx)
-	if err != nil {
-		releaseWriter()
-		return nil, err
-	}
-	return func() { releaseMaintenance(); releaseWriter() }, nil
+	// Writer lock (excludes ingestion and rewind) and maintenance lock
+	// (excludes API readers — an API-only replica takes no writer lock, and a
+	// partition reloaded under a still-published coverage would serve a
+	// hybrid history), both on ONE pool connection so the stages' own
+	// queries still have a connection at the documented two-connection floor.
+	return logstore.NewFromPool(l.pool).AcquireBackfillLocks(ctx)
 }
 
 // unitInterval is the block range of a partition that the manifest covers:

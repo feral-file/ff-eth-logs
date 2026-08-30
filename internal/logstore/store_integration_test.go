@@ -8,9 +8,11 @@ import (
 	"math/rand"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -401,4 +403,31 @@ func TestMaintenanceLockRefusesReaders(t *testing.T) {
 	require.ErrorIs(t, err, ErrMaintenance)
 	release()
 	require.NoError(t, s.Read(ctx, func(v View) error { _, _, err := v.Coverage(ctx); return err }))
+}
+
+// TestBackfillLocksUseOneConnection pins that holding both backfill locks
+// costs one pool connection: on a two-connection pool (the documented
+// floor) a query still runs while the locks are held.
+func TestBackfillLocksUseOneConnection(t *testing.T) {
+	ctx := context.Background()
+	base := testdb.Open(t)
+	cfg, err := pgxpool.ParseConfig(base.Config().ConnString())
+	require.NoError(t, err)
+	cfg.MaxConns = 2
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	s := NewFromPool(pool)
+
+	release, err := s.AcquireBackfillLocks(ctx)
+	require.NoError(t, err)
+	defer release()
+	qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, _, err = s.Coverage(qctx)
+	require.NoError(t, err, "a stage query must not starve behind the lock connection")
+	_, err = s.AcquireWriterLock(qctx)
+	require.ErrorIs(t, err, ErrWriterBusy, "the writer lock is held")
+	err = s.Read(qctx, func(v View) error { _, _, err := v.Coverage(qctx); return err })
+	require.ErrorIs(t, err, ErrMaintenance, "readers are excluded")
 }
