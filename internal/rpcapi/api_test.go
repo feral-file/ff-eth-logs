@@ -191,30 +191,28 @@ func TestGetLogs_BelowCoverageStart(t *testing.T) {
 	assert.Empty(t, logs)
 }
 
-// TestGetLogs_CryptoPunksMustPinAddress pins that a CryptoPunks signature is
-// only servable when the address selector is exactly the CryptoPunks
-// contract: the same signatures from other contracts are not stored.
-func TestGetLogs_CryptoPunksMustPinAddress(t *testing.T) {
+// TestGetLogs_CryptoPunksNeedNoAddressPin pins that a CryptoPunks signature
+// is served whatever the address selector says: unscoped (the indexer's
+// merged owner scan ORs punk signatures next to Transfer with no address),
+// mixed with a foreign contract, or pinned. The same signatures from other
+// contracts are a never-stored shape, not a scope rule.
+func TestGetLogs_CryptoPunksNeedNoAddressPin(t *testing.T) {
 	ctx := context.Background()
 	wh := &fakeWarehouse{head: 100}
 	api := NewAPI(wh, Config{ChainID: 1})
 	punks := [][]common.Hash{{eventset.PunkTransfer, eventset.Transfer}, nil, nil, nil}
 	other := common.HexToAddress("0x1")
 
-	var scope *ScopeError
-	_, err := api.GetLogs(ctx, FilterCriteria{FromBlock: big.NewInt(1), ToBlock: big.NewInt(2), Topics: punks})
-	require.ErrorAs(t, err, &scope)
-	assert.Contains(t, err.Error(), "CryptoPunks signatures are stored only for")
-
-	_, err = api.GetLogs(ctx, FilterCriteria{FromBlock: big.NewInt(1), ToBlock: big.NewInt(2), Topics: punks, Addresses: []common.Address{eventset.CryptoPunksAddress, other}})
-	require.ErrorAs(t, err, &scope)
-
-	_, err = api.GetLogs(ctx, FilterCriteria{FromBlock: big.NewInt(1), ToBlock: big.NewInt(2), Topics: punks, Addresses: []common.Address{eventset.CryptoPunksAddress}})
-	require.NoError(t, err)
-
-	// Standard signatures need no address pin.
-	_, err = api.GetLogs(ctx, FilterCriteria{FromBlock: big.NewInt(1), ToBlock: big.NewInt(2), Topics: transfer4(), Addresses: []common.Address{other}})
-	require.NoError(t, err)
+	for name, addrs := range map[string][]common.Address{
+		"unscoped": nil,
+		"mixed":    {eventset.CryptoPunksAddress, other},
+		"foreign":  {other},
+		"pinned":   {eventset.CryptoPunksAddress},
+	} {
+		_, err := api.GetLogs(ctx, FilterCriteria{FromBlock: big.NewInt(1), ToBlock: big.NewInt(2), Topics: punks, Addresses: addrs})
+		require.NoError(t, err, name)
+		assert.Equal(t, addrs, wh.gotQ.Addresses, "%s: the address selector reaches the store unchanged", name)
+	}
 }
 
 // TestGetLogs_AnyPositionCount pins that position count is not a scope

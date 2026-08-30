@@ -90,7 +90,7 @@ func IsWarehouseSignature(topic0 common.Hash) bool {
 	return ok
 }
 
-// OmittedShapes describes, per standard signature, what a node returns for
+// OmittedShapes describes, per warehouse signature, what a node returns for
 // that topic0 that the warehouse never stores — the fixed, documented delta
 // between a vendor answer and a warehouse answer for the same filter.
 func OmittedShapes(topic0 common.Hash) string {
@@ -103,6 +103,8 @@ func OmittedShapes(topic0 common.Hash) string {
 		return "logs with more than 1 topic (nonstandard emitters with indexed arguments)"
 	case URI:
 		return "logs with a topic count other than 2 (nonstandard emitters)"
+	case PunkTransfer, PunkAssign, PunkBought:
+		return "logs emitted by any contract other than CryptoPunks " + CryptoPunksAddress.Hex()
 	}
 	return ""
 }
