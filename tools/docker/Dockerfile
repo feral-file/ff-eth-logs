@@ -2,7 +2,8 @@
 #
 # Stages:
 #   1. builder — download modules, compile the single binary.
-#   2. runtime — alpine + CA certificates, unprivileged user, config mounted at /app/config.yaml.
+#   2. runtime — alpine + CA certificates, unprivileged user, config mounted at /app/config.yaml,
+#      the SQL schema under /app/db for the deployment to apply.
 
 # syntax=docker/dockerfile:1.4
 
@@ -27,6 +28,10 @@ RUN addgroup -g 1000 appuser && \
 WORKDIR /app
 
 COPY --from=builder /build/bin/ff-eth-logs .
+# The schema ships with the binary so a deployment applies the exact schema
+# the pinned image was built against (ff-deploy extracts /app/db/init_pg_db.sql
+# from the image and runs it with psql; every statement is IF NOT EXISTS).
+COPY --from=builder /build/db ./db
 
 RUN chown -R appuser:appuser /app
 

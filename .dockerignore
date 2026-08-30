@@ -66,11 +66,11 @@ tmp/
 temp/
 *.tmp
 
-# Database files (schema is applied by ops, not baked into the image)
+# Local database files. db/ itself stays in the context: the runtime image
+# ships db/ so the deployment applies the schema the pinned image was built
+# against.
 *.db
 *.sqlite
-*.sql
-db/
 
 # Parquet exports and local data volumes (backfill inputs are mounted, not baked in)
 *.parquet
