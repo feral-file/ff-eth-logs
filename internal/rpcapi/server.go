@@ -95,7 +95,8 @@ func (a *API) health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if errors.Is(err, logstore.ErrMaintenance) {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": "maintenance", "error": err.Error()})
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "maintenance", "error": err.Error(),
+			"hint": "a backfill is reloading published coverage or was interrupted before finish verified it; run the remaining stages and finish"})
 		return
 	}
 	if err != nil {

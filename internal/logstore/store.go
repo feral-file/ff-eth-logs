@@ -305,8 +305,34 @@ var ErrWriterBusy = errors.New("another writer holds the warehouse (serve ingest
 // partitions. Readers refuse instead (ErrMaintenance).
 const maintenanceLockKey = 0x66665f6574685f6d // "ff_eth_m"
 
-// ErrMaintenance is returned to a reader while a backfill holds the warehouse.
+// ErrMaintenance is returned to a reader while a backfill holds the
+// warehouse, or while the durable maintenance flag is set (a reload that
+// started mutating published coverage and has not been verified by finish).
 var ErrMaintenance = errors.New("warehouse is under maintenance (a backfill is reloading it)")
+
+// SetMaintenance records durably that published coverage is being mutated
+// (on) or has been verified again (off). Reason: the session-level
+// maintenance lock protects a running backfill; a reload that dies between
+// partitions releases it with the process, and the old coverage row would
+// authorize reads over a half-replaced warehouse. The flag survives the
+// process and is cleared only by a successful finish.
+func (s *Store) SetMaintenance(ctx context.Context, on bool, reason string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE warehouse_state SET maintenance = $1, reason = $2, updated_at = now() WHERE id = 1`, on, reason)
+	if err != nil {
+		return fmt.Errorf("set maintenance=%v: %w", on, err)
+	}
+	return nil
+}
+
+// Maintenance reports the durable flag and its reason.
+func (s *Store) Maintenance(ctx context.Context) (bool, string, error) {
+	var on bool
+	var reason string
+	if err := s.pool.QueryRow(ctx, `SELECT maintenance, reason FROM warehouse_state WHERE id = 1`).Scan(&on, &reason); err != nil {
+		return false, "", fmt.Errorf("read maintenance flag: %w", err)
+	}
+	return on, reason, nil
+}
 
 // AcquireWriterLock takes the session-level writer lock on one dedicated
 // connection and returns its release. Reason: the backfill deletes and

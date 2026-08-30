@@ -68,6 +68,14 @@ func (s *Store) Read(ctx context.Context, fn func(View) error) error {
 	if !admitted {
 		return ErrMaintenance
 	}
+	// The durable flag outlives a backfill that died mid-reload.
+	var flagged bool
+	if err := tx.QueryRow(ctx, `SELECT maintenance FROM warehouse_state WHERE id = 1`).Scan(&flagged); err != nil {
+		return fmt.Errorf("maintenance flag: %w", err)
+	}
+	if flagged {
+		return ErrMaintenance
+	}
 	if err := fn(snapshot{q: tx}); err != nil {
 		return err
 	}

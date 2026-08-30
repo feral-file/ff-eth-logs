@@ -273,6 +273,35 @@ func TestLoaderEndToEnd(t *testing.T) {
 	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM eth_logs`).Scan(&n))
 	assert.Equal(t, 4, n)
 
+	// Interrupted replacement of PUBLISHED coverage: a corrected export
+	// arrives, the reload sets the durable maintenance flag before touching
+	// part=000, and the run dies before part=001 (its file is unreadable).
+	// With no process and no lock left, reads stay refused until the
+	// remaining stages and finish verify the replacement.
+	corrected2 := []exportLog{
+		{BlockNumber: i64(12), LogIndex: i64(4), TxIndex: i64(1), TxHash: h('a'), Address: common.HexToAddress("0x1").Bytes(), Topic0: h('t'), Topic1: h('1'), Topic2: h('2'), Topic3: h('3'), Data: []byte{8, 8}, BlockTimestamp: i64(1)},
+		{BlockNumber: i64(7), LogIndex: i64(0), TxIndex: i64(0), TxHash: h('b'), Address: common.HexToAddress("0x1").Bytes(), Topic0: h('t'), Data: []byte{9}, BlockTimestamp: i64(1)},
+	}
+	writeParquet(t, part0, corrected2)
+	writeManifest(t, dir, 7, 1_000_005, map[string]int64{"000": 2, "001": 2})
+	part1 := filepath.Join(dir, "logs", "part=001", "logs-000000000000.parquet")
+	require.NoError(t, os.Chmod(part1, 0o000))
+	require.Error(t, l.Logs(ctx), "part=001 cannot be read after part=000 was reloaded")
+	require.NoError(t, os.Chmod(part1, 0o600))
+	on, _, err := store.Maintenance(ctx)
+	require.NoError(t, err)
+	assert.True(t, on, "maintenance persists after the interrupted run")
+	assert.ErrorIs(t, store.Read(ctx, func(v logstore.View) error { _, _, err := v.Coverage(ctx); return err }), logstore.ErrMaintenance)
+	require.NoError(t, l.Logs(ctx), "the resumed run reloads the rest")
+	assert.ErrorIs(t, store.Read(ctx, func(v logstore.View) error { _, _, err := v.Coverage(ctx); return err }), logstore.ErrMaintenance, "still refused until finish verifies")
+	require.NoError(t, l.Finish(ctx))
+	on, _, err = store.Maintenance(ctx)
+	require.NoError(t, err)
+	assert.False(t, on, "finish clears the flag after verification")
+	require.NoError(t, store.Read(ctx, func(v logstore.View) error { _, _, err := v.Coverage(ctx); return err }))
+	require.NoError(t, pool.QueryRow(ctx, `SELECT data FROM eth_logs WHERE block_number = 12`).Scan(&data))
+	assert.Equal(t, []byte{8, 8}, data)
+
 	// The tail then advances past the export end inside the same physical
 	// partition (part=001). A later logs/blocks/finish rerun must neither
 	// count, delete nor verify those rows, and must not lower the head.

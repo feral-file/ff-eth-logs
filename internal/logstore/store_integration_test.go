@@ -431,3 +431,21 @@ func TestBackfillLocksUseOneConnection(t *testing.T) {
 	err = s.Read(qctx, func(v View) error { _, _, err := v.Coverage(qctx); return err })
 	require.ErrorIs(t, err, ErrMaintenance, "readers are excluded")
 }
+
+// TestDurableMaintenanceFlagRefusesReaders pins that the flag persists
+// beyond any session: with no lock held at all, reads are refused while it
+// is set and admitted again once cleared.
+func TestDurableMaintenanceFlagRefusesReaders(t *testing.T) {
+	ctx := context.Background()
+	s := NewFromPool(testdb.Open(t))
+	require.NoError(t, s.WriteRange(ctx, 1, 1, blocksFor(1, 1), nil))
+	require.NoError(t, s.SetMaintenance(ctx, true, "test"))
+	on, reason, err := s.Maintenance(ctx)
+	require.NoError(t, err)
+	assert.True(t, on)
+	assert.Equal(t, "test", reason)
+	err = s.Read(ctx, func(v View) error { _, _, err := v.Coverage(ctx); return err })
+	require.ErrorIs(t, err, ErrMaintenance)
+	require.NoError(t, s.SetMaintenance(ctx, false, ""))
+	require.NoError(t, s.Read(ctx, func(v View) error { _, _, err := v.Coverage(ctx); return err }))
+}

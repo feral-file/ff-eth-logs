@@ -43,7 +43,7 @@ func Open(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("connect test database: %v", perr)
 	}
 	t.Cleanup(pool.Close)
-	if _, terr := pool.Exec(context.Background(), `TRUNCATE eth_logs, eth_blocks, ingest_cursor, backfill_units`); terr != nil {
+	if _, terr := pool.Exec(context.Background(), `TRUNCATE eth_logs, eth_blocks, ingest_cursor, backfill_units; UPDATE warehouse_state SET maintenance = false, reason = ''`); terr != nil {
 		t.Fatalf("truncate: %v", terr)
 	}
 	return pool

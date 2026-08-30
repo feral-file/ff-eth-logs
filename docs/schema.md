@@ -61,6 +61,17 @@ Only confirmed blocks (at least `ethereum.confirmation_blocks` behind the tip) a
 
 Written in the same transaction as the unit's rows. A stage skips a unit only when the database holds the manifest's row count *and* the recorded fingerprint equals the current manifest's; otherwise the unit is cleared and reloaded, so a corrected export with the same row count but different bytes is never taken as already loaded. `finish` refuses to publish while any unit in the interval was loaded from a different export than the manifest describes (`… was loaded from a different export than manifest.json describes (or never recorded); rerun its stage`).
 
+### warehouse_state
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `smallint` PK, `CHECK (id = 1)` | one row, created by the init script |
+| `maintenance` | `boolean NOT NULL` | set by a backfill before it mutates a unit inside the published coverage; cleared by `finish` after verification |
+| `reason` | `text NOT NULL` | which unit started the reload |
+| `updated_at` | `timestamptz NOT NULL` | |
+
+Every read snapshot checks it (after the shared maintenance lock) and refuses with `out of warehouse scope: warehouse is under maintenance …` while it is set. It outlives the backfill process: a corrected reload that dies between partitions leaves it set, so the stale coverage row cannot authorize reads over a half-replaced warehouse; running the remaining stages and `finish` clears it.
+
 ### ingest_cursor
 
 | Column | Type | Notes |

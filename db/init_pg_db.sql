@@ -61,6 +61,19 @@ CREATE TABLE IF NOT EXISTS backfill_units (
     loaded_at   timestamptz NOT NULL DEFAULT now()
 );
 
+-- Durable maintenance flag. A backfill sets it before the first mutation of
+-- a unit inside the published coverage and finish clears it after the
+-- replacement is verified; every read snapshot refuses while it is set, so
+-- a reload that dies between partitions cannot serve a hybrid history once
+-- its session lock is gone.
+CREATE TABLE IF NOT EXISTS warehouse_state (
+    id          smallint PRIMARY KEY CHECK (id = 1),
+    maintenance boolean NOT NULL DEFAULT false,
+    reason      text NOT NULL DEFAULT '',
+    updated_at  timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO warehouse_state (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+
 -- The covered interval [coverage_start, block_number]: every block in it has
 -- its eth_blocks row and every warehouse log. Exactly one row; written in the
 -- same transaction as the blocks and logs it accounts for, so it is never

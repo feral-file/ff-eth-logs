@@ -65,6 +65,18 @@ func (l *Loader) Lock(ctx context.Context) (func(), error) {
 	return logstore.NewFromPool(l.pool).AcquireBackfillLocks(ctx)
 }
 
+// markMaintenance sets the durable maintenance flag before a unit inside the
+// published coverage is mutated. A fresh warehouse (no coverage) needs no
+// flag: its reads are refused as empty until finish publishes.
+func (l *Loader) markMaintenance(ctx context.Context, unit string) error {
+	store := logstore.NewFromPool(l.pool)
+	_, ok, err := store.Coverage(ctx)
+	if err != nil || !ok {
+		return err
+	}
+	return store.SetMaintenance(ctx, true, "backfill reloading "+unit+"; run the remaining stages and finish to verify")
+}
+
 // unitInterval is the block range of a partition that the manifest covers:
 // the partition clipped to [Blocks.First, Blocks.Last]. Every count, delete
 // and verification uses it, so rows the tail wrote above the manifest end
@@ -141,7 +153,11 @@ func (l *Loader) Finish(ctx context.Context) error {
 			return fmt.Errorf("analyze %s: %w", table, err)
 		}
 	}
-	if err := logstore.NewFromPool(l.pool).SetCoverage(ctx, cov); err != nil {
+	store := logstore.NewFromPool(l.pool)
+	if err := store.SetCoverage(ctx, cov); err != nil {
+		return err
+	}
+	if err := store.SetMaintenance(ctx, false, ""); err != nil {
 		return err
 	}
 	logger.InfoCtx(ctx, "Backfill finished; coverage published", zap.Uint64("start", cov.Start), zap.Uint64("head", cov.Head))
@@ -346,6 +362,9 @@ func (l *Loader) loadPart(ctx context.Context, m *Manifest, part uint64) error {
 		logger.WarnCtx(ctx, "Partition was loaded from different content or holds a different row count; reloading it",
 			zap.Uint64("part", part), zap.Int64("rows", have), zap.Int64("manifestRows", want), zap.Bool("sameExport", recorded == fingerprint))
 	}
+	if err := l.markMaintenance(ctx, unit); err != nil {
+		return err
+	}
 	start := time.Now()
 	conn, err := l.pool.Acquire(ctx)
 	if err != nil {
@@ -441,6 +460,9 @@ func (l *Loader) Blocks(ctx context.Context) error {
 	if have != 0 {
 		logger.WarnCtx(ctx, "eth_blocks was loaded from different content or holds a different row count; reloading",
 			zap.Int64("rows", have), zap.Int64("manifestRows", m.Blocks.Rows), zap.Bool("sameExport", recorded == fingerprint))
+	}
+	if err := l.markMaintenance(ctx, blocksUnit); err != nil {
+		return err
 	}
 	start := time.Now()
 	tx, err := l.pool.Begin(ctx)
