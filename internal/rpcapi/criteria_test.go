@@ -59,6 +59,9 @@ func TestFilterCriteriaUnmarshal(t *testing.T) {
 		{name: "short address", in: `{"address":"0x01"}`, wantErr: "invalid address: hex has invalid length 1 after decoding; expected 20 for address"},
 		{name: "bad address in array", in: `{"address":["0x01"]}`, wantErr: "invalid address at index 0: hex has invalid length 1 after decoding; expected 20 for address"},
 		{name: "non-string address in array", in: `{"address":[1]}`, wantErr: "non-string address at index 0"},
+		// geth (eth/filters/api.go) rejects a null address element the same
+		// way; only topics treat null as a wildcard.
+		{name: "null address in array", in: `{"address":[null,"` + addrPunks + `"]}`, wantErr: "non-string address at index 0"},
 		{name: "address object", in: `{"address":{}}`, wantErr: "invalid addresses in query"},
 	}
 	for _, tc := range cases {
