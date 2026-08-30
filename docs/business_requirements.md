@@ -44,7 +44,7 @@ The historical half of that traffic does not need a node at all. The warehouse h
 
 ## 6. Success criteria
 
-- **Exactness on the stored set** — for an in-scope filter inside coverage, the response equals the vendor's response minus the documented never-stored shapes (ERC-20 / pre-standard `Transfer`s, nonstandard emitters); verified live on 2026-08-29 against Infura for owner scans, contract provenance, ERC-1155 and CryptoPunks filters (identical) and for a broad `Transfer` window (identical after removing the vendor's <4-topic logs), on backfilled and on tail-written blocks alike.
+- **Exactness on the stored set** — for an in-scope filter inside coverage, the response equals the vendor's response minus the documented never-stored shapes (ERC-20 / pre-standard `Transfer`s, nonstandard emitters, CryptoPunks-signature logs from other contracts); verified live on 2026-08-29 against Infura for owner scans, contract provenance, ERC-1155 and CryptoPunks filters (identical) and for a broad `Transfer` window (identical after removing the vendor's <4-topic logs), on backfilled and on tail-written blocks alike.
 - **One query per walk** — a full-history owner scan or token provenance is a single `eth_getLogs` call served from indexed columns, not ~2,600 windows.
 - **Measured size** (probe of 2026-08-28, [docs/probe_2026-08.md](probe_2026-08.md)): **402,266,375** logs to block 25,842,829, modelled at **≈ 205 GB** in PostgreSQL (510 B/log all-in), growing **≈ 1.5 GB/month** (12-month average 2.9 M logs/month).
 - **Currency** — head within ~2 blocks + fetch latency of the tip in steady state; a restart resumes from the durable cursor without gaps.

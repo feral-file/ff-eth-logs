@@ -57,12 +57,12 @@ Resolution follows geth's `GetLogs` / `Filter.Logs` order of checks, then bounds
 
 ### 3.3 Scope rule
 
-Two rules the warehouse adds to geth's. First, **`topics[0]` must be present, non-empty, and every entry must be a warehouse signature.** Otherwise the answer would silently omit every other event on the chain, so the request is refused:
+One rule the warehouse adds to geth's: **`topics[0]` must be present, non-empty, and every entry must be a warehouse signature.** Otherwise the answer would silently omit every other event on the chain, so the request is refused:
 
 - `-32000 out of warehouse scope: filter must name at least one warehouse event signature in topics[0]`
 - `-32000 out of warehouse scope: topic0 0x… is not a warehouse event signature`
 
-Second, **what an in-scope answer is.** On the logs it stores, the warehouse applies the vendor's matching semantics exactly: addresses OR'd, a valued topic position must exist and match, an empty position (`null`, `[]`, or absent) imposes nothing — not even that the topic exists. That last point was measured, not assumed: on Infura (Geth v1.17.5, 2026-08-29, block 25,700,000) `[[Transfer]]`, `[[Transfer],null,null,null]`, `[[Transfer],[],[],[]]` and `[[Transfer],null]` all returned the same 814 logs (804 of them 3-topic ERC-20), for range and `blockHash` queries alike; go-ethereum's older `filterLogs` rule "N positions need ≥ N topics" is not what the vendor serves. Position count is therefore not a scope rule here.
+Then, **what an in-scope answer is.** On the logs it stores, the warehouse applies the vendor's matching semantics exactly: addresses OR'd, a valued topic position must exist and match, an empty position (`null`, `[]`, or absent) imposes nothing — not even that the topic exists. That last point was measured, not assumed: on Infura (Geth v1.17.5, 2026-08-29, block 25,700,000) `[[Transfer]]`, `[[Transfer],null,null,null]`, `[[Transfer],[],[],[]]` and `[[Transfer],null]` all returned the same 814 logs (804 of them 3-topic ERC-20), for range and `blockHash` queries alike; go-ethereum's older `filterLogs` rule "N positions need ≥ N topics" is not what the vendor serves. Position count is therefore not a scope rule here.
 
 What differs from the vendor is only the **stored set**: per signature, the warehouse never holds the shapes the indexer's parsers reject, so a vendor answer minus those shapes equals the warehouse answer (verified: the vendor's 25-block `[[Transfer],null,null,null]` answer filtered to 4-topic logs was identical, 65 = 65, to the warehouse's). The omitted shapes (`eventset.OmittedShapes`):
 
@@ -72,13 +72,11 @@ What differs from the vendor is only the **stored set**: per signature, the ware
 | `TransferSingle`, `TransferBatch` | logs with fewer than 4 topics (malformed emitters) |
 | `MetadataUpdate`, `BatchMetadataUpdate` | logs with more than 1 topic (nonstandard emitters with indexed arguments) |
 | `URI` | logs with a topic count other than 2 |
-| CryptoPunks signatures | the same signatures emitted by any contract other than `0xb47e…3bbb` (and such filters are refused, see below) |
+| `PunkTransfer`, `Assign`, `PunkBought` | the same signatures emitted by any contract other than CryptoPunks `0xb47e…3bbb` |
 
 A client that needs any of those must ask a node; the indexer does not, because its parsers discard exactly them.
 
-Third, **a CryptoPunks signature (`PunkTransfer`, `Assign`, `PunkBought`) is servable only when `address` is present and every entry is `0xb47e3cd837ddf8e4c57f05d70ab865de6e193bbb`.** The same signatures emitted by other contracts are not stored (`eventset.Keep`), so an unpinned or mixed-address filter would return a subset a node would not:
-
-- `-32000 out of warehouse scope: CryptoPunks signatures are stored only for 0xb47E3cd837dDF8e4c57F05d70Ab865de6e193BBB; restrict address to it`
+The address selector is not a scope rule. A CryptoPunks signature with no `address`, or with a foreign one, is served from the CryptoPunks logs alone — the omission of the same signatures from other contracts is the fixed delta above, exactly like ERC-20 logs under an unscoped `Transfer`. The warehouse used to refuse that case (`CryptoPunks signatures are stored only for …; restrict address to it`); the rule was dropped because the indexer's merged owner scan ORs the punk signatures next to `Transfer` in `topics[0]` with no address (`adapters.BuildOwnerQueries`), so it would have refused every owner scan for the sake of a consumer that wants punk-signature logs from other contracts — and there is none.
 
 Scope checks run before the head is read, so they are reported even on an empty warehouse. `ScopeError` messages deliberately avoid the words `range`, `limit` and `too many` so a range-cap classifier never mistakes them for a window to halve.
 
@@ -124,13 +122,13 @@ Exceeding `rpc.max_results` (default 100,000) returns `-32000 query returned mor
 | CryptoPunks `Assign(address,uint256)` | `0x8a0e37b73a0d9c82e205d4d1a3ff3d0b57ce5f4d7bccf6bac03336dc101cb7ba` | same |
 | CryptoPunks `PunkBought(uint256,uint256,address,address)` | `0x58e5d5a525e3b40bc15abaa38b5882678db1ee68befd2f60bafe3a7fd06db9e3` | same |
 
-The stored shapes are the ones the indexer's parsers accept; a node holds more (3-topic ERC-20 and 1-topic pre-standard `Transfer`s, nonstandard `MetadataUpdate`/`URI` shapes, CryptoPunks-signature events from other contracts). An in-scope answer is therefore the vendor's answer minus those shapes and nothing else — for the Transfer family that means the ERC-20 and pre-standard logs a node would also return are absent; the CryptoPunks address rule above exists because for those signatures the omitted set would otherwise depend on the address filter. Everything else (coverage, event set, tags) is a scope error for the vendor.
+The stored shapes are the ones the indexer's parsers accept; a node holds more (3-topic ERC-20 and 1-topic pre-standard `Transfer`s, nonstandard `MetadataUpdate`/`URI` shapes, CryptoPunks-signature events from other contracts). An in-scope answer is therefore the vendor's answer minus those shapes and nothing else — for the Transfer family that means the ERC-20 and pre-standard logs a node would also return are absent; for the CryptoPunks signatures it means the logs other contracts emit under them are absent whatever the address selector says. Everything else (coverage, event set, tags) is a scope error for the vendor.
 
 ## 4. What a routing client should do
 
 1. Call `eth_blockNumber` on the warehouse to learn the head `H`.
-2. Send every `eth_getLogs` whose `topics[0]` is within the set (CryptoPunks signatures pinned to the contract) and whose range lies inside `[coverage_start, H]` (`GET /health` reports both) here, unpaginated (no span cap applies), with the filter unchanged — position count does not matter to either side.
-3. Send the residual range `(H, tip]`, anything below `coverage_start`, anything with an empty or foreign `topics[0]`, and anything that needs the omitted shapes (ERC-20, nonstandard emitters) to the vendor; that range is ≤ a few blocks behind the tip, bills one request and needs no pagination.
+2. Send every `eth_getLogs` whose `topics[0]` is within the set and whose range lies inside `[coverage_start, H]` (`GET /health` reports both) here, unpaginated (no span cap applies), with the filter unchanged — position count does not matter to either side.
+3. Send the residual range `(H, tip]`, anything below `coverage_start`, anything with an empty or foreign `topics[0]`, and anything that needs the omitted shapes (ERC-20, nonstandard emitters, punk-signature logs from other contracts) to the vendor; that range is ≤ a few blocks behind the tip, bills one request and needs no pagination.
 4. Treat `-32000 out of warehouse scope: …` as fall-through to the vendor, never as a retry or a window split.
 5. Treat `query returned more than N results` as the existing too-many-results signal and halve the window.
 6. Merge the two legs in `(blockNumber, logIndex)` order.

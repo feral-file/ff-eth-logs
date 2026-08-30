@@ -50,10 +50,9 @@ func NewAPI(store Warehouse, cfg Config) *API { return &API{store: store, cfg: c
 
 // ScopeError is returned for a request the warehouse cannot answer from its
 // stored set: a block outside the covered interval, a signature outside the
-// event set, a filter without a topic0, or a CryptoPunks signature not
-// pinned to the CryptoPunks contract. Within scope the answer is the vendor's
-// minus the shapes the warehouse never stores (eventset.OmittedShapes), a
-// fixed delta documented in docs/api_design.md. It carries JSON-RPC code -32000 (geth's default for
+// event set, or a filter without a topic0. Within scope the answer is the
+// vendor's minus the shapes the warehouse never stores
+// (eventset.OmittedShapes), a fixed delta documented in docs/api_design.md. It carries JSON-RPC code -32000 (geth's default for
 // handler errors) and a message that deliberately avoids the words a
 // range-cap classifier keys on ("range", "limit", "too many"), so a client
 // treats it as out-of-scope rather than as a window to halve.
@@ -131,7 +130,7 @@ func (a *API) GetLogs(ctx context.Context, crit FilterCriteria) ([]*types.Log, e
 	if len(crit.Topics) > maxTopics {
 		return nil, errExceedMaxTopics
 	}
-	if err := checkTopicScope(crit.Topics, crit.Addresses); err != nil {
+	if err := checkTopicScope(crit.Topics); err != nil {
 		return nil, err
 	}
 	ctx, cancel := a.bounded(ctx)
@@ -168,42 +167,30 @@ func (a *API) GetLogs(ctx context.Context, crit FilterCriteria) ([]*types.Log, e
 	return out, nil
 }
 
-// checkTopicScope enforces the rules the warehouse adds: the filter must pin
-// topic0 to warehouse signatures (otherwise the answer would silently omit
-// every other event on the chain), and a CryptoPunks signature must be
-// pinned to the CryptoPunks contract, because the same signatures from any
-// other address are not stored (eventset.Keep). Topic position counts are
-// not constrained: the vendor ignores trailing wildcards (see logstore.Query),
-// so no position rule could change what a node returns.
-func checkTopicScope(topics [][]common.Hash, addresses []common.Address) error {
+// checkTopicScope enforces the one rule the warehouse adds: the filter must
+// pin topic0 to warehouse signatures, otherwise the answer would silently
+// omit every other event on the chain. Nothing else about the filter is
+// constrained. Topic position counts are not: the vendor ignores trailing
+// wildcards (see logstore.Query), so no position rule could change what a
+// node returns. The address selector is not either: a CryptoPunks signature
+// with no (or a foreign) address is served from the CryptoPunks logs alone —
+// the same signatures from other contracts are simply a never-stored shape
+// (eventset.OmittedShapes), exactly like ERC-20 logs under an unscoped
+// Transfer filter. Refusing that case used to reject the indexer's merged
+// owner scan (all signatures OR'd in topics[0], no address) outright, which
+// would have routed every owner scan to the vendor for the sake of a
+// consumer that needs punk-signature logs from other contracts, of which
+// there is none.
+func checkTopicScope(topics [][]common.Hash) error {
 	if len(topics) == 0 || len(topics[0]) == 0 {
 		return &ScopeError{Reason: "filter must name at least one warehouse event signature in topics[0]"}
 	}
-	punks := false
 	for _, sig := range topics[0] {
 		if !eventset.IsWarehouseSignature(sig) {
 			return &ScopeError{Reason: fmt.Sprintf("topic0 %s is not a warehouse event signature", sig.Hex())}
 		}
-		punks = punks || eventset.IsCryptoPunksSignature(sig)
-	}
-	if punks && !onlyCryptoPunks(addresses) {
-		return &ScopeError{Reason: fmt.Sprintf("CryptoPunks signatures are stored only for %s; restrict address to it", eventset.CryptoPunksAddress.Hex())}
 	}
 	return nil
-}
-
-// onlyCryptoPunks reports whether addresses is non-empty and every entry is
-// the CryptoPunks contract.
-func onlyCryptoPunks(addresses []common.Address) bool {
-	if len(addresses) == 0 {
-		return false
-	}
-	for _, a := range addresses {
-		if a != eventset.CryptoPunksAddress {
-			return false
-		}
-	}
-	return true
 }
 
 // resolveRange turns the criteria into a concrete block range, following
