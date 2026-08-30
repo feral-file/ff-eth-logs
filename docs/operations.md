@@ -50,7 +50,7 @@ The copy (≈ 16 GB) is only needed for the load; it is the disaster-recovery so
   `blocks.last` is the export's **`export_end`** — the single block captured at the start of the extract script that bounds the logs materialization and the blocks export alike (see [docs/probe_2026-08.md](probe_2026-08.md)); for `v1` it is 25,842,829, the dataset head at materialization. Never derive it from the blocks export itself: the live blocks table can advance between the two steps, and `backfill blocks` trims what it loads to the manifest interval precisely so that a longer blocks export cannot widen coverage past the logs extract. Every partition from `first/1000000` to `last/1000000` must have an entry, zero for the empty ones.
 - `files` comes from the objects as GCS stores them: `gcloud storage ls --format=json -r 'gs://eth-logs/eth-log-warehouse/v1/**'` yields `size` and `md5_hash` (base64) per object; the key is the object path relative to the export root.
 
-Assemble the three into `manifest.json`, upload it next to the export (`gs://eth-logs/eth-log-warehouse/v1/manifest.json`) so every copy carries it, and never edit it on the loading host. The `v0-rehearsal` prefix deliberately has no manifest.
+Assemble the three into `manifest.json`, upload it next to the export so every copy carries it, and never edit it on the loading host. **`v1` has its manifest**: `gs://eth-logs/eth-log-warehouse/v1/manifest.json` (uploaded 2026-08-30; 26 partitions `000`–`025`, 402,266,375 logs, blocks 0–25,842,829, 5,629 files / 16.12 GB), so `gcloud storage cp -r gs://eth-logs/eth-log-warehouse/v1 ./data/` brings it along. The `v0-rehearsal` prefix deliberately has no manifest.
 
 
 ### 1.3 Run the backfill
