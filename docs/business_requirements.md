@@ -27,7 +27,7 @@ The historical half of that traffic does not need a node at all. The warehouse h
 ## 4. In-scope capabilities
 
 - **Chain**: Ethereum mainnet (`eth_chainId` = 1).
-- **Events**: ERC-721 `Transfer` (4 topics), ERC-1155 `TransferSingle` / `TransferBatch` (4 topics) and `URI` (2 topics), EIP-4906 `MetadataUpdate` / `BatchMetadataUpdate` (1 topic), and CryptoPunks `PunkTransfer` / `Assign` / `PunkBought` from `0xb47e3cd837ddf8e4c57f05d70ab865de6e193bbb` only — the set and shapes the indexer's parsers accept (`internal/eventset`).
+- **Events**: ERC-721 `Transfer` (4 topics; any shape from CryptoPunks `0xb47e…3bbb`, whose 3-topic internal `Transfer` the indexer's owner scan depends on), ERC-1155 `TransferSingle` / `TransferBatch` (4 topics) and `URI` (2 topics), EIP-4906 `MetadataUpdate` / `BatchMetadataUpdate` (1 topic), and CryptoPunks `PunkTransfer` / `Assign` / `PunkBought` from `0xb47e3cd837ddf8e4c57f05d70ab865de6e193bbb` only — the set and shapes the indexer's parsers accept (`internal/eventset`).
 - **Methods**: `eth_getLogs`, `eth_blockNumber` (warehouse head), `eth_chainId`; `GET /health`.
 - **Full history**: genesis to the head (first stored log at block 937,821).
 - **Tail ingestion** with confirmation lag, bounded catch-up, dense-block receipts fallback, and shape rules identical to the backfill.

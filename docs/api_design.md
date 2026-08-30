@@ -112,7 +112,7 @@ Exceeding `rpc.max_results` (default 100,000) returns `-32000 query returned mor
 
 | Event | `topics[0]` | Stored shape |
 | --- | --- | --- |
-| ERC-721 `Transfer(address,address,uint256)` | `0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef` | exactly 4 topics |
+| ERC-721 `Transfer(address,address,uint256)` | `0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef` | exactly 4 topics — except from CryptoPunks `0xb47e3cd837ddf8e4c57f05d70ab865de6e193bbb`: any shape (its 3-topic internal `Transfer`) |
 | ERC-1155 `TransferSingle(address,address,address,uint256,uint256)` | `0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62` | 4 topics |
 | ERC-1155 `TransferBatch(address,address,address,uint256[],uint256[])` | `0x4a39dc06d4c0dbc64b70af90fd698a233a518aa5d07e595d983b8c0526c8f7fb` | 4 topics |
 | EIP-4906 `MetadataUpdate(uint256)` | `0xf8e1a15aba9398e019f0b49df1a4fde98ee17ae345cb5f6b5e2c27f5033e8ce7` | 1 topic |
