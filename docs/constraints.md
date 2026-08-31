@@ -13,7 +13,7 @@ Hard and soft constraints for **FF Eth Logs**. Treat these as guardrails when ch
 - **Shape rules are identical in both write paths** — `eventset.Keep` (tail ingestion) and the BigQuery extract `WHERE` clause (backfill, [probe](probe_2026-08.md)) must stay in lock-step. Any drift changes served results depending on how a block reached the warehouse.
 - **Every stored height has an `eth_blocks` row** — the reader joins `eth_blocks` for `blockHash` / `blockTimestamp`; `WriteRange` refuses a batch whose block rows do not cover `[from, to]`, because a missing row would silently drop that block's logs from every response.
 - **Replays are idempotent** — `WriteRange` deletes the range before COPY; re-ingesting a range after a restart overwrites rather than duplicates.
-- **Migrations** — `db/migrations/NNN.sql`, mirrored into `db/init_pg_db.sql`; the four secondary index statements must be byte-identical to `logstore.SecondaryIndexes`.
+- **Migrations** — `db/migrations/NNN.sql`, mirrored into `db/init_pg_db.sql`; the six secondary index statements must be byte-identical to `logstore.SecondaryIndexes`.
 
 ## 2. API and compatibility constraints
 

@@ -38,34 +38,34 @@ func TestBuildFilter(t *testing.T) {
 	assert.NotContains(t, sql, "ANY(")
 	assert.Len(t, args, 2)
 
-	// ERC1155ID with a TransferSingle-only topics[0] collapses to one clean
-	// index-served arm: topic0 = TransferSingle AND data word 0 = id.
+	// ERC1155ID: the TransferSingle arm inlines topic0 as a fixed bytea literal
+	// (so the partial index stays eligible under a generic prepared plan) and
+	// keeps the id parameterized. TransferSingle-only collapses to that one arm.
 	id := common.HexToHash("0x2a")
 	ts := eventset.TransferSingle
+	lit := transferSingleTopic0SQL
 	sql, args = buildFilter(Query{FromBlock: 1, ToBlock: 2, Topics: [][]common.Hash{{ts}}, ERC1155ID: &id}, 0)
-	assert.Contains(t, sql, "((l.topic0 = $3 AND substring(l.data from 1 for 32) = $4))")
-	require.Len(t, args, 4)
-	assert.Equal(t, ts.Bytes(), args[2])
-	assert.Equal(t, id.Bytes(), args[3])
+	assert.Contains(t, sql, "((l.topic0 = "+lit+" AND substring(l.data from 1 for 32) = $3))")
+	assert.NotContains(t, sql, "l.topic0 = $", "TransferSingle topic0 must be a literal, not a parameter")
+	require.Len(t, args, 3)
+	assert.Equal(t, id.Bytes(), args[2])
 
-	// A mixed [[TransferSingle, URI]] topics[0] becomes a two-arm OR, each arm
-	// index-served: TransferSingle by data word 0, URI by topic1.
+	// A mixed [[TransferSingle, URI]] topics[0] becomes a two-arm OR: TS by the
+	// literal + data word 0, URI by topic1 (served by eth_logs_t1, param is fine).
 	uri := eventset.URI
 	sql, args = buildFilter(Query{FromBlock: 1, ToBlock: 2, Topics: [][]common.Hash{{ts, uri}}, ERC1155ID: &id}, 0)
-	assert.Contains(t, sql, "((l.topic0 = $3 AND substring(l.data from 1 for 32) = $4) OR (l.topic0 = $5 AND l.topic1 = $6))")
-	require.Len(t, args, 6)
-	assert.Equal(t, ts.Bytes(), args[2])
-	assert.Equal(t, id.Bytes(), args[3])
-	assert.Equal(t, uri.Bytes(), args[4])
-	assert.Equal(t, id.Bytes(), args[5])
+	assert.Contains(t, sql, "((l.topic0 = "+lit+" AND substring(l.data from 1 for 32) = $3) OR (l.topic0 = $4 AND l.topic1 = $5))")
+	require.Len(t, args, 5)
+	assert.Equal(t, id.Bytes(), args[2])
+	assert.Equal(t, uri.Bytes(), args[3])
+	assert.Equal(t, id.Bytes(), args[4])
 
 	// URI alone is still id-filtered, by topic1.
 	sql, _ = buildFilter(Query{FromBlock: 1, ToBlock: 2, Topics: [][]common.Hash{{uri}}, ERC1155ID: &id}, 0)
 	assert.Contains(t, sql, "((l.topic0 = $3 AND l.topic1 = $4))")
 	assert.NotContains(t, sql, "substring(l.data")
 
-	// A signature without an id column (TransferBatch: array ids) passes
-	// through unfiltered — no data or topic1 predicate is emitted for it.
+	// A signature without an id column (TransferBatch) passes through unfiltered.
 	batch := eventset.TransferBatch
 	sql, _ = buildFilter(Query{FromBlock: 1, ToBlock: 2, Topics: [][]common.Hash{{batch}}, ERC1155ID: &id}, 0)
 	assert.NotContains(t, sql, "substring(l.data")
@@ -74,6 +74,13 @@ func TestBuildFilter(t *testing.T) {
 
 	// nil ERC1155ID never emits the data predicate.
 	assert.NotContains(t, buildFilterSQL(Query{FromBlock: 1, ToBlock: 2, Topics: [][]common.Hash{{ts}}}), "substring(l.data")
+}
+
+// TestBuildFilterTransferSingleLiteral pins the inlined topic0 literal to
+// eventset.TransferSingle so it cannot drift from the index predicate.
+func TestBuildFilterTransferSingleLiteral(t *testing.T) {
+	want := "'\\x" + strings.TrimPrefix(eventset.TransferSingle.Hex(), "0x") + "'::bytea"
+	assert.Equal(t, want, transferSingleTopic0SQL)
 }
 
 // buildFilterSQL is a tiny helper returning only the SQL, for negative asserts.

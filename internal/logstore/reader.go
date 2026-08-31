@@ -156,6 +156,18 @@ func filterLogs(ctx context.Context, db rowQuerier, q Query, limit int) ([]types
 	return logs, nil
 }
 
+// transferSingleTopic0SQL is eventset.TransferSingle as a fixed SQL bytea
+// literal, e.g. '\xc3d5…'::bytea. The eth_logs_erc1155_id partial index has
+// predicate topic0 = <TransferSingle literal>; a query must repeat that literal
+// for the planner to prove index eligibility. A bound parameter ($n) would not:
+// pgx caches prepared statements, and once PostgreSQL switches a statement to a
+// generic plan the parameter value is unknown at plan time, so topic0 = $n
+// cannot imply the partial predicate and the index becomes ineligible — the
+// full-contract scan this feature exists to avoid. The value is a trusted
+// compile-time constant (not user input), so inlining it is injection-safe;
+// TestBuildFilterTransferSingleLiteral pins it to eventset.TransferSingle.
+var transferSingleTopic0SQL = fmt.Sprintf("'\\x%x'::bytea", eventset.TransferSingle.Bytes())
+
 // buildFilter renders q as SQL with positional parameters. The WHERE clause
 // is assembled from fixed fragments; user data only ever travels as
 // parameters, never in the SQL text.
@@ -207,8 +219,11 @@ func buildFilter(q Query, limit int) (string, []any) {
 			}
 			var arms []string
 			if hasTS {
+				// topic0 as a fixed literal (see transferSingleTopic0SQL) so the
+				// partial index stays eligible under a generic prepared plan; the
+				// id stays parameterized.
 				arms = append(arms, fmt.Sprintf("(l.topic0 = %s AND substring(l.data from 1 for 32) = %s)",
-					arg(eventset.TransferSingle.Bytes()), arg(q.ERC1155ID.Bytes())))
+					transferSingleTopic0SQL, arg(q.ERC1155ID.Bytes())))
 			}
 			if hasURI {
 				arms = append(arms, fmt.Sprintf("(l.topic0 = %s AND l.topic1 = %s)",

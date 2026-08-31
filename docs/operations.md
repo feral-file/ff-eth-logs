@@ -65,7 +65,7 @@ ff-eth-logs backfill -config /app/config.yaml -dir ./data/v1
 
 Stages run in order and are each idempotent (`-stage prepare|logs|blocks|finish` runs one):
 
-1. `prepare` — drops the four secondary indexes (`Dropped index for bulk load`).
+1. `prepare` — drops the six secondary indexes (`Dropped index for bulk load`).
 2. `logs` — one transaction per `part=NNN` directory: COPY into a temp staging table, `INSERT … ORDER BY (block_number, log_index)` into the partition (`Partition loaded` with `rows` and `took`; on re-run `Partition already loaded from this export, skipping` when the row count and the recorded manifest fingerprint both match, otherwise the partition is cleared and reloaded). The busiest partition holds ~60 M rows and is sorted by PostgreSQL.
 3. `blocks` — all 4,048 files into `eth_blocks` in one transaction (`Blocks load progress` every 500 files), keeping only rows inside the manifest's `[first, last]` (requires `manifest.json`; see 1.2 on why the blocks export can be longer than the logs extract).
 4. `finish` — verifies the load against `manifest.json` at the export root (section 1.2): `eth_blocks` must be exactly the manifest's interval and row count; every partition the interval implies must exist and hold the manifest's row count both in its Parquet footers and in the database; every listed file must match its recorded size and MD5 and no unlisted Parquet file may be present. Any mismatch is `backfill is not complete, cursor not set: …` and nothing is published. Then it recreates the indexes (`Index ready` per index with `took`), `ANALYZE`, and publishes coverage `[manifest first, manifest last]` (`Backfill finished; coverage published`). Until `finish` succeeds the API reports the warehouse as empty.
@@ -79,7 +79,7 @@ Stages run in order and are each idempotent (`-stage prepare|logs|blocks|finish`
 | `finish` | 1 h 19 m | verification ≈ 5 min (contiguity, per-partition counts, 16 GB of MD5s); index builds `t1` 18.1 m, `t2` 18.4 m, `t3` 20.2 m, `addr` 15.3 m; `ANALYZE` + publish ≈ 2 min |
 | **total** | **4 h 03 m** | 06:19 → 10:22 UTC, one process, no retries |
 
-Disk after the load: 164 GB database (heap ≈ 110 GB, four secondary indexes ≈ 12 GB each). Memory never exceeded the 2 GB container cap. Session-level PostgreSQL settings that matter: `maintenance_work_mem` for the four index builds over 400 M rows (e.g. `maintenance_work_mem = '2GB'`), `work_mem` for the per-partition sort (anything below the partition size spills to an external sort, which is correct but slower), and enough WAL headroom (`max_wal_size`) for a multi-GB COPY per transaction. Set them in `postgresql.conf` for the load or `ALTER SYSTEM`, and reset afterwards.
+Disk after the load: 164 GB database (heap ≈ 110 GB, six secondary indexes). Memory never exceeded the 2 GB container cap. Session-level PostgreSQL settings that matter: `maintenance_work_mem` for the six index builds over 400 M rows (e.g. `maintenance_work_mem = '2GB'`), `work_mem` for the per-partition sort (anything below the partition size spills to an external sort, which is correct but slower), and enough WAL headroom (`max_wal_size`) for a multi-GB COPY per transaction. Set them in `postgresql.conf` for the load or `ALTER SYSTEM`, and reset afterwards.
 
 A failed stage rolls its transaction back; re-run the same command and it resumes at the first unloaded partition.
 
@@ -209,16 +209,24 @@ is partitioned, so `CREATE INDEX CONCURRENTLY` cannot run on the parent
 directly; build each leaf concurrently and attach it:
 
 ```bash
+set -euo pipefail
+PSQL="psql -v ON_ERROR_STOP=1"           # every psql failure aborts the run
 # 1. Invalid parent shell (no data, instant, takes no lasting lock).
-psql -c "CREATE INDEX IF NOT EXISTS <name> ON ONLY eth_logs (<cols>) WHERE <pred>"
-# 2. Per partition: build CONCURRENTLY, then attach. Attaching the last leaf
-#    flips the parent to valid; new tail partitions inherit it automatically.
-for p in $(seq -w 0 39); do
-  psql -c "CREATE INDEX CONCURRENTLY IF NOT EXISTS eth_logs_p${p}_<suffix> ON eth_logs_p${p} (<cols>) WHERE <pred>"
-  psql -c "ALTER INDEX <name> ATTACH PARTITION eth_logs_p${p}_<suffix>"
+$PSQL -c "CREATE INDEX IF NOT EXISTS <name> ON ONLY eth_logs (<cols>) WHERE <pred>"
+# 2. Per partition: build CONCURRENTLY, then attach. Partitions are named with
+#    THREE digits (eth_logs_p000 .. eth_logs_p039), so format the suffix with
+#    %03d — `seq -w 0 39` yields two digits and would target eth_logs_p00.
+#    Attaching the last leaf flips the parent to valid; new tail partitions
+#    inherit it automatically.
+for i in $(seq 0 39); do
+  part=$(printf 'eth_logs_p%03d' "$i")
+  $PSQL -c "CREATE INDEX CONCURRENTLY IF NOT EXISTS ${part}_<suffix> ON ${part} (<cols>) WHERE <pred>"
+  $PSQL -c "ALTER INDEX <name> ATTACH PARTITION ${part}_<suffix>"
 done
-# 3. Confirm valid, then deploy the image whose init DDL now no-ops.
-psql -tAc "SELECT indisvalid FROM pg_index WHERE indexrelid = '<name>'::regclass"
+# 3. Enforce that the parent is valid before deploying the image whose init DDL
+#    now no-ops; a false here means a leaf failed to attach — do not deploy.
+$PSQL -tAc "SELECT indisvalid FROM pg_index WHERE indexrelid = '<name>'::regclass" | grep -qx t \
+  || { echo "parent index <name> is INVALID — a leaf did not attach; do not deploy" >&2; exit 1; }
 ```
 
 Run it with `statement_timeout = 0` (a large partition takes minutes) and expect

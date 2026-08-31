@@ -98,11 +98,13 @@ CREATE INDEX eth_logs_t1   ON eth_logs (topic1, block_number) WHERE topic1 IS NO
 CREATE INDEX eth_logs_t2   ON eth_logs (topic2, block_number) WHERE topic2 IS NOT NULL;
 CREATE INDEX eth_logs_t3   ON eth_logs (topic3, block_number) WHERE topic3 IS NOT NULL;
 CREATE INDEX eth_logs_addr ON eth_logs (address, block_number);
+CREATE INDEX eth_logs_addr_t3 ON eth_logs (address, topic3, block_number) WHERE topic3 IS NOT NULL;
+CREATE INDEX eth_logs_erc1155_id ON eth_logs (address, (substring(data from 1 for 32)), block_number) WHERE topic0 = '\xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62'::bytea;
 ```
 
-plus the primary key and `eth_blocks_hash`. The block range sits in every key so a bounded scan never touches the heap for out-of-range rows. Not indexed, on purpose: `tx_hash` (the only tx lookup in the indexer is bounded by address + block) and `topic0` alone (every served query carries a block range or a more selective column).
+`eth_logs_addr_t3` serves ERC-721 per-token provenance (`address` + `topic3` = tokenId) as a point lookup; `eth_logs_erc1155_id` serves ERC-1155 per-token provenance, whose id is data word 0 of `TransferSingle` (the warehouse-only `erc1155Id` filter, [api design](api_design.md)). plus the primary key and `eth_blocks_hash`. The block range sits in every key so a bounded scan never touches the heap for out-of-range rows. Not indexed, on purpose: `tx_hash` (the only tx lookup in the indexer is bounded by address + block) and `topic0` alone (every served query carries a block range or a more selective column).
 
-**Rule**: the four statements in `db/init_pg_db.sql` must be byte-identical to `logstore.SecondaryIndexes`. The backfill drops them (`prepare`) and recreates them (`finish`) from the Go list, and `TestSchemaMatchesInit` compares the two; changing one without the other fails the test.
+**Rule**: the six statements in `db/init_pg_db.sql` must be byte-identical to `logstore.SecondaryIndexes`. The backfill drops them (`prepare`) and recreates them (`finish`) from the Go list, and `TestSchemaMatchesInit` compares the two; changing one without the other fails the test.
 
 ## 5. Size model
 
@@ -130,7 +132,8 @@ Migrations live in `db/migrations/` as sequentially numbered `NNN.sql` and are m
 | Owner scan, owner as `to` / ERC-1155 `from` | `topics[2] = owner` | `eth_logs_t2` |
 | Owner scan, ERC-1155 `to` | `topics[3] = owner` | `eth_logs_t3` |
 | Contract provenance (ERC-721 / ERC-1155 / CryptoPunks) | `address = contract`, block range | `eth_logs_addr` |
-| ERC-721 token provenance | `address = contract AND topics[3] = tokenId` | `eth_logs_addr` or `eth_logs_t3`, planner's choice |
+| ERC-721 token provenance | `address = contract AND topics[3] = tokenId` | `eth_logs_addr_t3` |
+| ERC-1155 token provenance (`erc1155Id` filter) | `address = contract AND TransferSingle data word 0 = id`; URI arm `topic1 = id` | `eth_logs_erc1155_id` (TransferSingle) + `eth_logs_t1` (URI) |
 | Per-block reads (tail ingestion replay, deletes) | `block_number BETWEEN a AND b` | primary key on the pruned partition |
 | `eth_getLogs {blockHash}` | `eth_blocks.hash = h` → one block | `eth_blocks_hash`, then the primary key |
 | Reorg rewind | `block_number > n` | primary key |
