@@ -31,10 +31,10 @@ type Query struct {
 	// that the vendor answers. A position with values requires the topic to
 	// exist and match, which a NULL column never does.
 	Topics [][]common.Hash
-	// ERC1155ID restricts TransferSingle logs (topic0 = eventset.TransferSingle)
-	// to the one whose data word 0 equals it; logs of every other signature in
-	// the filter are untouched, so a mixed [[TransferSingle, URI]] query keeps
-	// its URI logs. nil imposes nothing. See rpcapi.FilterCriteria.ERC1155ID.
+	// ERC1155ID restricts the ERC-1155 token-scoped signatures to one token id:
+	// TransferSingle by data word 0, URI by topic1 (the two places the id is
+	// carried). Any other requested signature (e.g. TransferBatch) passes
+	// through. nil imposes nothing. See rpcapi.FilterCriteria.ERC1155ID.
 	ERC1155ID *common.Hash
 }
 
@@ -180,24 +180,28 @@ func buildFilter(q Query, limit int) (string, []any) {
 			continue // wildcard: no clause, the topic need not exist
 		}
 		if i == 0 && q.ERC1155ID != nil {
-			// Restrict TransferSingle rows to the token id (data word 0). Write
-			// it as an explicit top-level OR of clean indexable arms rather than
-			// a "topic0 <> TransferSingle OR substring = id" filter tucked behind
-			// the topic0 = ANY(...) clause: only the explicit form lets the
-			// planner BitmapOr the TransferSingle arm through the partial
-			// expression index eth_logs_erc1155_id (predicate topic0 =
-			// TransferSingle, key address+data-word) instead of scanning the
-			// contract's whole history. The remaining signatures (URI etc.) keep
-			// their own index; a mixed [[TransferSingle, URI]] query is served by
-			// the union, so its URI rows — whose id lives in topic1, not data —
-			// are unaffected. TransferSingle absent from topics[0] leaves only
-			// the second arm, i.e. the id is a no-op, which is correct.
+			// Restrict the ERC-1155 token-scoped signatures to one token id,
+			// written as an explicit top-level OR of clean indexable arms. The id
+			// lives in a different place per signature: data word 0 for
+			// TransferSingle (served by the partial expression index
+			// eth_logs_erc1155_id), topic1 for URI (served by eth_logs_t1). Only
+			// this explicit form lets the planner BitmapOr those indexes per
+			// partition; the "topic0 <> TransferSingle OR substring = id" filter
+			// it replaced hid the OR behind topic0 = ANY(...) and measured a
+			// full-contract scan (>120 s vs 127 ms) for a mixed
+			// [[TransferSingle, URI]] query on a large contract. Any other
+			// requested signature (TransferBatch, whose ids are a data array, not
+			// a fixed word) has no id column, so it passes through unfiltered as
+			// its own arm — the same set a node returns for it.
 			var others [][]byte
-			hasTS := false
+			hasTS, hasURI := false, false
 			for _, h := range sub {
-				if h == eventset.TransferSingle {
+				switch h {
+				case eventset.TransferSingle:
 					hasTS = true
-				} else {
+				case eventset.URI:
+					hasURI = true
+				default:
 					others = append(others, h.Bytes())
 				}
 			}
@@ -205,6 +209,10 @@ func buildFilter(q Query, limit int) (string, []any) {
 			if hasTS {
 				arms = append(arms, fmt.Sprintf("(l.topic0 = %s AND substring(l.data from 1 for 32) = %s)",
 					arg(eventset.TransferSingle.Bytes()), arg(q.ERC1155ID.Bytes())))
+			}
+			if hasURI {
+				arms = append(arms, fmt.Sprintf("(l.topic0 = %s AND l.topic1 = %s)",
+					arg(eventset.URI.Bytes()), arg(q.ERC1155ID.Bytes())))
 			}
 			if len(others) > 0 {
 				arms = append(arms, fmt.Sprintf("l.topic0 = ANY(%s::bytea[])", arg(others)))

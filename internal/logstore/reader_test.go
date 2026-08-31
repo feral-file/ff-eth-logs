@@ -48,19 +48,28 @@ func TestBuildFilter(t *testing.T) {
 	assert.Equal(t, ts.Bytes(), args[2])
 	assert.Equal(t, id.Bytes(), args[3])
 
-	// A mixed [[TransferSingle, URI]] topics[0] becomes a two-arm OR: the id
-	// restricts only the TransferSingle arm; URI passes through so its logs
-	// (id in topic1, not data) are still returned.
+	// A mixed [[TransferSingle, URI]] topics[0] becomes a two-arm OR, each arm
+	// index-served: TransferSingle by data word 0, URI by topic1.
 	uri := eventset.URI
 	sql, args = buildFilter(Query{FromBlock: 1, ToBlock: 2, Topics: [][]common.Hash{{ts, uri}}, ERC1155ID: &id}, 0)
-	assert.Contains(t, sql, "((l.topic0 = $3 AND substring(l.data from 1 for 32) = $4) OR l.topic0 = ANY($5::bytea[]))")
-	require.Len(t, args, 5)
-	assert.Equal(t, [][]byte{uri.Bytes()}, args[4])
+	assert.Contains(t, sql, "((l.topic0 = $3 AND substring(l.data from 1 for 32) = $4) OR (l.topic0 = $5 AND l.topic1 = $6))")
+	require.Len(t, args, 6)
+	assert.Equal(t, ts.Bytes(), args[2])
+	assert.Equal(t, id.Bytes(), args[3])
+	assert.Equal(t, uri.Bytes(), args[4])
+	assert.Equal(t, id.Bytes(), args[5])
 
-	// TransferSingle absent from topics[0] makes the id a no-op: only the
-	// remaining signatures constrain topic0, no data predicate is emitted.
+	// URI alone is still id-filtered, by topic1.
 	sql, _ = buildFilter(Query{FromBlock: 1, ToBlock: 2, Topics: [][]common.Hash{{uri}}, ERC1155ID: &id}, 0)
+	assert.Contains(t, sql, "((l.topic0 = $3 AND l.topic1 = $4))")
 	assert.NotContains(t, sql, "substring(l.data")
+
+	// A signature without an id column (TransferBatch: array ids) passes
+	// through unfiltered — no data or topic1 predicate is emitted for it.
+	batch := eventset.TransferBatch
+	sql, _ = buildFilter(Query{FromBlock: 1, ToBlock: 2, Topics: [][]common.Hash{{batch}}, ERC1155ID: &id}, 0)
+	assert.NotContains(t, sql, "substring(l.data")
+	assert.NotContains(t, sql, "l.topic1 =")
 	assert.Contains(t, sql, "(l.topic0 = ANY($3::bytea[]))")
 
 	// nil ERC1155ID never emits the data predicate.
