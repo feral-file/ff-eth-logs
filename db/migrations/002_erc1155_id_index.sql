@@ -26,8 +26,9 @@ CREATE INDEX IF NOT EXISTS eth_logs_erc1155_id
 
 -- 2. Recovery: drop any of our leaf indexes a prior run left INVALID and
 --    unattached (a failed CONCURRENTLY build), so step 3 rebuilds it cleanly
---    instead of IF NOT EXISTS skipping the broken one.
-SELECT format('DROP INDEX IF EXISTS %I', ci.relname)
+--    instead of IF NOT EXISTS skipping the broken one. CONCURRENTLY so the
+--    cleanup keeps the no-interruption promise (autocommit \gexec permits it).
+SELECT format('DROP INDEX CONCURRENTLY IF EXISTS %I', ci.relname)
 FROM pg_class ci
 JOIN pg_index x ON x.indexrelid = ci.oid
 WHERE ci.relname LIKE 'eth\_logs\_p%\_erc1155\_id'
