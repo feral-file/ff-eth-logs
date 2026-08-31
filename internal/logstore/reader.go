@@ -9,6 +9,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/feral-file/ff-eth-logs/internal/eventset"
 )
 
 // Query is a resolved eth_getLogs filter: an inclusive block range plus
@@ -29,6 +31,11 @@ type Query struct {
 	// that the vendor answers. A position with values requires the topic to
 	// exist and match, which a NULL column never does.
 	Topics [][]common.Hash
+	// ERC1155ID restricts TransferSingle logs (topic0 = eventset.TransferSingle)
+	// to the one whose data word 0 equals it; logs of every other signature in
+	// the filter are untouched, so a mixed [[TransferSingle, URI]] query keeps
+	// its URI logs. nil imposes nothing. See rpcapi.FilterCriteria.ERC1155ID.
+	ERC1155ID *common.Hash
 }
 
 // ErrTooManyResults is returned when a query would exceed the caller's limit.
@@ -177,6 +184,13 @@ func buildFilter(q Query, limit int) (string, []any) {
 			vals[j] = h.Bytes()
 		}
 		where = append(where, fmt.Sprintf("%s = ANY(%s::bytea[])", col, arg(vals)))
+	}
+	if q.ERC1155ID != nil {
+		// Restrict only TransferSingle rows to the id (data word 0); any other
+		// signature in the filter is left in. The partial expression index
+		// eth_logs_erc1155_id serves the TransferSingle branch as a point lookup.
+		where = append(where, fmt.Sprintf("(l.topic0 <> %s OR substring(l.data from 1 for 32) = %s)",
+			arg(eventset.TransferSingle.Bytes()), arg(q.ERC1155ID.Bytes())))
 	}
 	sql := selectLogs + " WHERE " + strings.Join(where, " AND ") + " ORDER BY l.block_number, l.log_index"
 	if limit > 0 {

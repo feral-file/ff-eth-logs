@@ -63,6 +63,14 @@ func TestFilterCriteriaUnmarshal(t *testing.T) {
 		// way; only topics treat null as a wildcard.
 		{name: "null address in array", in: `{"address":[null,"` + addrPunks + `"]}`, wantErr: "non-string address at index 0"},
 		{name: "address object", in: `{"address":{}}`, wantErr: "invalid addresses in query"},
+		{name: "erc1155Id present", in: `{"topics":["` + sigTransfer + `"],"erc1155Id":"0x000000000000000000000000000000000000000000000000000000000000002a"}`,
+			check: func(t *testing.T, c FilterCriteria) {
+				require.NotNil(t, c.ERC1155ID)
+				assert.Equal(t, common.HexToHash("0x2a"), *c.ERC1155ID)
+			}},
+		{name: "erc1155Id absent is nil", in: `{"topics":["` + sigTransfer + `"]}`,
+			check: func(t *testing.T, c FilterCriteria) { assert.Nil(t, c.ERC1155ID) }},
+		{name: "erc1155Id wrong length", in: `{"erc1155Id":"0x2a"}`, wantErr: "hex string has length 2, want 64 for common.Hash"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

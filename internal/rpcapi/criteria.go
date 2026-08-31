@@ -41,6 +41,13 @@ type FilterCriteria struct {
 	ToBlock   *big.Int
 	Addresses []common.Address
 	Topics    [][]common.Hash
+	// ERC1155ID, when set, restricts ERC-1155 TransferSingle logs to the one
+	// token whose id — the first 32-byte word of data — equals it; logs of
+	// every other signature in the same filter pass through unaffected. It is a
+	// warehouse-specific extension a standard node ignores, so it only travels
+	// on the warehouse leg of a routing client; the vendor filter stays
+	// standard eth_getLogs. Absent (nil) reproduces today's behavior exactly.
+	ERC1155ID *common.Hash
 }
 
 // UnmarshalJSON decodes the filter exactly as geth does, including the
@@ -52,6 +59,7 @@ func (args *FilterCriteria) UnmarshalJSON(data []byte) error {
 		ToBlock   *rpc.BlockNumber `json:"toBlock"`
 		Addresses interface{}      `json:"address"`
 		Topics    []interface{}    `json:"topics"`
+		ERC1155ID *common.Hash     `json:"erc1155Id"`
 	}
 	var raw input
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -88,6 +96,8 @@ func (args *FilterCriteria) UnmarshalJSON(data []byte) error {
 			args.Topics[i] = sub
 		}
 	}
+	// common.Hash.UnmarshalJSON already enforced the 32-byte length.
+	args.ERC1155ID = raw.ERC1155ID
 	return nil
 }
 

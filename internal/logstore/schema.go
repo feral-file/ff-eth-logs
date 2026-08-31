@@ -42,6 +42,15 @@ var SecondaryIndexes = []IndexDef{
 	{Name: "eth_logs_t3", DDL: "CREATE INDEX eth_logs_t3 ON eth_logs (topic3, block_number) WHERE topic3 IS NOT NULL"},
 	{Name: "eth_logs_addr", DDL: "CREATE INDEX eth_logs_addr ON eth_logs (address, block_number)"},
 	{Name: "eth_logs_addr_t3", DDL: "CREATE INDEX eth_logs_addr_t3 ON eth_logs (address, topic3, block_number) WHERE topic3 IS NOT NULL"},
+	// ERC-1155 per-token provenance: TransferSingle carries the token id in
+	// data word 0 (not a topic), so without this a per-token query scans the
+	// contract's whole TransferSingle history (~575k rows for the OpenSea
+	// storefront, measured 2026-08-31) and filters client-side, once per
+	// token. A partial expression index keyed on that word turns it into a
+	// point lookup. Only the warehouse erc1155Id filter uses it; the topic0
+	// predicate must stay byte-identical to eventset.TransferSingle (guarded
+	// by TestSchemaERC1155IndexMatchesSignature).
+	{Name: "eth_logs_erc1155_id", DDL: "CREATE INDEX eth_logs_erc1155_id ON eth_logs (address, (substring(data from 1 for 32)), block_number) WHERE topic0 = '\\xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62'::bytea"},
 }
 
 // PartitionName is the eth_logs partition holding block n.

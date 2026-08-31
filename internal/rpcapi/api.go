@@ -198,7 +198,7 @@ func checkTopicScope(topics [][]common.Hash) error {
 // interval. empty=true reproduces geth returning [] for begin > end after
 // resolution.
 func resolveRange(ctx context.Context, v logstore.View, crit FilterCriteria, cov logstore.Coverage) (logstore.Query, bool, error) {
-	q := logstore.Query{Addresses: crit.Addresses, Topics: crit.Topics}
+	q := logstore.Query{Addresses: crit.Addresses, Topics: crit.Topics, ERC1155ID: crit.ERC1155ID}
 	if crit.BlockHash != nil {
 		block, ok, err := v.BlockByHash(ctx, *crit.BlockHash)
 		if err != nil {
