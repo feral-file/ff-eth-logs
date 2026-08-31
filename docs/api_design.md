@@ -21,9 +21,9 @@ Every other method (including `eth_getBlockByNumber`, `eth_call`, `eth_getTransa
 
 ## 3. `eth_getLogs` contract
 
-### 3.1 Parameter parsing (identical to geth)
+### 3.1 Parameter parsing (geth, plus one warehouse-only field)
 
-The single parameter is decoded by a copy of `filters.FilterCriteria.UnmarshalJSON`; a decoding failure is a `-32602 invalid argument 0: <message>` with these messages:
+The single parameter is decoded by a copy of `filters.FilterCriteria.UnmarshalJSON` — every standard field and error message is geth's — extended with one optional warehouse-only field, `erc1155Id` (§3.4). A decoding failure is a `-32602 invalid argument 0: <message>` with these messages:
 
 | Input | Rule | Message |
 | --- | --- | --- |
@@ -124,11 +124,40 @@ Exceeding `rpc.max_results` (default 100,000) returns `-32000 query returned mor
 
 The stored shapes are the ones the indexer's parsers accept; a node holds more (3-topic ERC-20 and 1-topic pre-standard `Transfer`s, nonstandard `MetadataUpdate`/`URI` shapes, CryptoPunks-signature events from other contracts). An in-scope answer is therefore the vendor's answer minus those shapes and nothing else — for the Transfer family that means the ERC-20 and pre-standard logs a node would also return are absent (the CryptoPunks contract's own 3-topic `Transfer` excepted: it is stored); for the CryptoPunks signatures it means the logs other contracts emit under them are absent whatever the address selector says. Everything else (coverage, event set, tags) is a scope error for the vendor.
 
+### 3.4 Warehouse-only filter: `erc1155Id`
+
+`eth_getLogs` accepts one field a standard node does not: `erc1155Id`, a 32-byte
+hex quantity (the same length and encoding as a topic). It exists because an
+ERC-1155 `TransferSingle` carries its token id in **data word 0**, not a topic,
+so standard `eth_getLogs` cannot select a single token — a per-token query would
+otherwise scan a contract's whole `TransferSingle` history and filter
+client-side (measured: ~575k rows for the OpenSea Shared Storefront).
+
+Semantics: when present, it restricts **only** `TransferSingle` rows
+(`topic0 = TransferSingle`) to the one whose data word 0 equals the value. Rows
+of every other signature in the same `topics[0]` pass through unaffected — so a
+mixed `[[TransferSingle, URI]]` filter keeps its `URI` rows, whose id is in
+`topic1`, not data. A filter that does not name `TransferSingle` is unchanged
+(the field is a no-op). Absent, behaviour is exactly as before. The value is
+decoded as a `common.Hash`; a length other than 32 bytes is
+`hex string has length N, want 64 for common.Hash`.
+
+Served by the partial expression index `eth_logs_erc1155_id`
+(`address, (substring(data from 1 for 32)), block_number) WHERE topic0 =
+TransferSingle`). Scope is unchanged: `topics[0]` must still name warehouse
+signatures (§3.3); `erc1155Id` narrows, it never widens.
+
+**A standard node ignores `erc1155Id`** and would return the token's siblings —
+every `TransferSingle` of the contract — so a routing client MUST send it only
+on the warehouse leg and strip it from the vendor leg (§4). `TransferBatch`
+(array-valued ids) is out of scope: its ids are not a fixed data word and are
+not matched by this field.
+
 ## 4. What a routing client should do
 
 1. Call `eth_blockNumber` on the warehouse to learn the head `H`.
-2. Send every `eth_getLogs` whose `topics[0]` is within the set and whose range lies inside `[coverage_start, H]` (`GET /health` reports both) here, unpaginated (no span cap applies), with the filter unchanged — position count does not matter to either side.
-3. Send the residual range `(H, tip]`, anything below `coverage_start`, anything with an empty or foreign `topics[0]`, and anything that needs the omitted shapes (ERC-20, nonstandard emitters, punk-signature logs from other contracts) to the vendor; that range is ≤ a few blocks behind the tip, bills one request and needs no pagination.
+2. Send every `eth_getLogs` whose `topics[0]` is within the set and whose range lies inside `[coverage_start, H]` (`GET /health` reports both) here, unpaginated (no span cap applies), with the filter otherwise unchanged — position count does not matter to either side. A per-token ERC-1155 query may add `erc1155Id` (§3.4) on this leg only.
+3. Send the residual range `(H, tip]`, anything below `coverage_start`, anything with an empty or foreign `topics[0]`, and anything that needs the omitted shapes (ERC-20, nonstandard emitters, punk-signature logs from other contracts) to the vendor; that range is ≤ a few blocks behind the tip, bills one request and needs no pagination. **Strip `erc1155Id` from any vendor-leg request** — a node ignores it and would merge back the token's siblings; filter those rows client-side instead.
 4. Treat `-32000 out of warehouse scope: …` as fall-through to the vendor, never as a retry or a window split.
 5. Treat `query returned more than N results` as the existing too-many-results signal and halve the window.
 6. Merge the two legs in `(blockNumber, logIndex)` order.
@@ -136,7 +165,7 @@ The stored shapes are the ones the indexer's parsers accept; a node holds more (
 ## 5. Compatibility expectations
 
 - **Byte-compatible with `eth_getLogs`** for in-scope filters: the log JSON, ordering, empty-array result and error strings match go-ethereum v1.16.5. Upgrading go-ethereum is a compatibility event if it changes `types.Log` JSON or the filter error messages.
-- **Additive only** — a new method or a new signature in the set is additive; removing a signature, changing a shape rule, changing the meaning of `eth_blockNumber`, or changing the scope-error code or wording is a breaking change for the routing client and needs a coordinated indexer release.
+- **Additive only** — a new method, a new signature in the set, or a new optional warehouse-only filter field (like `erc1155Id`) that a node ignores is additive; removing a signature, changing a shape rule, changing the meaning of `eth_blockNumber`, or changing the scope-error code or wording is a breaking change for the routing client and needs a coordinated indexer release.
 - **Errors stay distinguishable** — scope errors must never contain `range`, `limit` or `too many`; the result-cap error must keep the `query returned more than` prefix.
 - **`GET /health`** keeps the four fields; add fields, do not rename them.
 

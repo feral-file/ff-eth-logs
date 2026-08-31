@@ -192,6 +192,43 @@ The service is deployed by ff-deploy (push the config and image bump to `main` i
 
 Deployment order for a schema change is enforced by the role: schema first (from the new image), then the container running that image. Migrations that are not `IF NOT EXISTS`-safe do not exist yet; when one is needed, add it under `db/migrations/` and have the role apply it in order before `init_pg_db.sql` — do not rely on the service to migrate at start-up.
 
+### 7.1 Adding a secondary index to a populated warehouse
+
+A new entry in `logstore.SecondaryIndexes` also lands in `init_pg_db.sql` as a
+`CREATE INDEX IF NOT EXISTS`. On a **fresh** database that is correct — the
+statement builds the index on empty (or backfilled-then-indexed) partitions. On
+a **populated** production warehouse, letting the deploy build it is wrong:
+`init_pg_db.sql` runs non-concurrently and would take an `ACCESS EXCLUSIVE` lock
+across `eth_logs` while it builds over hundreds of millions of rows, blocking
+tail writes for the duration.
+
+So for a populated warehouse the index is built **out-of-band and concurrently,
+before the image that carries the new DDL is deployed** — then the `IF NOT
+EXISTS` is a no-op and the deploy neither locks nor stops ingestion. `eth_logs`
+is partitioned, so `CREATE INDEX CONCURRENTLY` cannot run on the parent
+directly; build each leaf concurrently and attach it:
+
+```bash
+# 1. Invalid parent shell (no data, instant, takes no lasting lock).
+psql -c "CREATE INDEX IF NOT EXISTS <name> ON ONLY eth_logs (<cols>) WHERE <pred>"
+# 2. Per partition: build CONCURRENTLY, then attach. Attaching the last leaf
+#    flips the parent to valid; new tail partitions inherit it automatically.
+for p in $(seq -w 0 39); do
+  psql -c "CREATE INDEX CONCURRENTLY IF NOT EXISTS eth_logs_p${p}_<suffix> ON eth_logs_p${p} (<cols>) WHERE <pred>"
+  psql -c "ALTER INDEX <name> ATTACH PARTITION eth_logs_p${p}_<suffix>"
+done
+# 3. Confirm valid, then deploy the image whose init DDL now no-ops.
+psql -tAc "SELECT indisvalid FROM pg_index WHERE indexrelid = '<name>'::regclass"
+```
+
+Run it with `statement_timeout = 0` (a large partition takes minutes) and expect
+a few minutes per dense partition on the 2-vCPU host; ingestion keeps running
+throughout. `eth_logs_addr_t3` (#7) and `eth_logs_erc1155_id` were both rolled
+out this way. This is deliberately not a `db/migrations/` entry: the DDL is the
+same `IF NOT EXISTS` statement `init_pg_db.sql` already carries, and the repo
+has no migration runner — the ordering guarantee here is operational (build
+before deploy), not a versioned migration.
+
 ## 8. Backfill on the deployed host
 
 Run the backfill as a **one-off container with the service stopped**, never `docker compose exec` into the live container:

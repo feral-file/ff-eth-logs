@@ -179,18 +179,46 @@ func buildFilter(q Query, limit int) (string, []any) {
 		if len(sub) == 0 {
 			continue // wildcard: no clause, the topic need not exist
 		}
+		if i == 0 && q.ERC1155ID != nil {
+			// Restrict TransferSingle rows to the token id (data word 0). Write
+			// it as an explicit top-level OR of clean indexable arms rather than
+			// a "topic0 <> TransferSingle OR substring = id" filter tucked behind
+			// the topic0 = ANY(...) clause: only the explicit form lets the
+			// planner BitmapOr the TransferSingle arm through the partial
+			// expression index eth_logs_erc1155_id (predicate topic0 =
+			// TransferSingle, key address+data-word) instead of scanning the
+			// contract's whole history. The remaining signatures (URI etc.) keep
+			// their own index; a mixed [[TransferSingle, URI]] query is served by
+			// the union, so its URI rows — whose id lives in topic1, not data —
+			// are unaffected. TransferSingle absent from topics[0] leaves only
+			// the second arm, i.e. the id is a no-op, which is correct.
+			var others [][]byte
+			hasTS := false
+			for _, h := range sub {
+				if h == eventset.TransferSingle {
+					hasTS = true
+				} else {
+					others = append(others, h.Bytes())
+				}
+			}
+			var arms []string
+			if hasTS {
+				arms = append(arms, fmt.Sprintf("(l.topic0 = %s AND substring(l.data from 1 for 32) = %s)",
+					arg(eventset.TransferSingle.Bytes()), arg(q.ERC1155ID.Bytes())))
+			}
+			if len(others) > 0 {
+				arms = append(arms, fmt.Sprintf("l.topic0 = ANY(%s::bytea[])", arg(others)))
+			}
+			if len(arms) > 0 {
+				where = append(where, "("+strings.Join(arms, " OR ")+")")
+			}
+			continue
+		}
 		vals := make([][]byte, len(sub))
 		for j, h := range sub {
 			vals[j] = h.Bytes()
 		}
 		where = append(where, fmt.Sprintf("%s = ANY(%s::bytea[])", col, arg(vals)))
-	}
-	if q.ERC1155ID != nil {
-		// Restrict only TransferSingle rows to the id (data word 0); any other
-		// signature in the filter is left in. The partial expression index
-		// eth_logs_erc1155_id serves the TransferSingle branch as a point lookup.
-		where = append(where, fmt.Sprintf("(l.topic0 <> %s OR substring(l.data from 1 for 32) = %s)",
-			arg(eventset.TransferSingle.Bytes()), arg(q.ERC1155ID.Bytes())))
 	}
 	sql := selectLogs + " WHERE " + strings.Join(where, " AND ") + " ORDER BY l.block_number, l.log_index"
 	if limit > 0 {
