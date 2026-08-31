@@ -16,15 +16,15 @@ The script is idempotent (`IF NOT EXISTS` throughout). ff-deploy does this on **
 
 ### 1.2 Copy the export
 
-The export lives in GCS (US multi-region, Parquet/SNAPPY). As of the run of 2026-08-28 the `v1` prefix holds the warehouse set to block **25,842,829** (dataset head, 2026-08-26 23:59:59 UTC):
+The export lives in GCS (US multi-region, Parquet/SNAPPY). As of the run of 2026-08-31 the `v2` prefix holds the warehouse set to block **25,864,358** (the dataset head captured as `export_end` at materialization):
 
 | Prefix | Size | Files |
 | --- | --- | --- |
-| `gs://eth-logs/eth-log-warehouse/v1/logs/part=000` … `part=025` | 14.87 GB | 1,581 (`logs-*.parquet`) |
-| `gs://eth-logs/eth-log-warehouse/v1/blocks` | 1.25 GB | 4,048 (`blocks-*.parquet`) |
+| `gs://eth-logs/eth-log-warehouse/v2/logs/part=000` … `part=025` | 14.88 GB | 1,575 (`logs-*.parquet`) |
+| `gs://eth-logs/eth-log-warehouse/v2/blocks` | 1.25 GB | 4,051 (`blocks-*.parquet`) |
 
 ```bash
-gcloud storage cp -r gs://eth-logs/eth-log-warehouse/v1 ./data/
+gcloud storage cp -r gs://eth-logs/eth-log-warehouse/v2 ./data/
 ```
 
 The copy (≈ 16 GB) is only needed for the load; it is the disaster-recovery source and stays in GCS.
@@ -33,10 +33,10 @@ The copy (≈ 16 GB) is only needed for the load; it is the disaster-recovery so
 
 ```json
 {
-  "export": "eth-log-warehouse/v1",
-  "source": "bigquery-public-data.crypto_ethereum, extract of 2026-08-28",
-  "blocks": {"first": 0, "last": 25842829, "rows": 25842830},
-  "logs":   {"rows": 402266375, "parts": {"000": 0, "001": 0, "...": 0, "025": 123456}},
+  "export": "eth-log-warehouse/v2",
+  "source": "bigquery-public-data.crypto_ethereum, extract of 2026-08-31",
+  "blocks": {"first": 0, "last": 25864358, "rows": 25864359},
+  "logs":   {"rows": 402634739, "parts": {"000": 0, "001": 0, "...": 0, "025": 19749550}},
   "files":  {"logs/part=016/logs-000000000000.parquet": {"size": 11543755, "md5": "<base64>"}, "blocks/blocks-000000000000.parquet": {"size": 300706, "md5": "<base64>"}}
 }
 ```
@@ -45,12 +45,12 @@ The copy (≈ 16 GB) is only needed for the load; it is the disaster-recovery so
   ```sql
   SELECT DIV(block_number, 1000000) AS part, COUNT(*) AS rows FROM `indexer-eth-logs.eth_warehouse.logs` GROUP BY part ORDER BY part;
   SELECT COUNT(*) AS rows FROM `indexer-eth-logs.eth_warehouse.logs`;
-  SELECT MIN(number) AS first, MAX(number) AS last, COUNT(*) AS rows FROM `bigquery-public-data.crypto_ethereum.blocks` WHERE number <= 25842829;
+  SELECT MIN(number) AS first, MAX(number) AS last, COUNT(*) AS rows FROM `bigquery-public-data.crypto_ethereum.blocks` WHERE number <= 25864358;
   ```
-  `blocks.last` is the export's **`export_end`** — the single block captured at the start of the extract script that bounds the logs materialization and the blocks export alike (see [docs/probe_2026-08.md](probe_2026-08.md)); for `v1` it is 25,842,829, the dataset head at materialization. Never derive it from the blocks export itself: the live blocks table can advance between the two steps, and `backfill blocks` trims what it loads to the manifest interval precisely so that a longer blocks export cannot widen coverage past the logs extract. Every partition from `first/1000000` to `last/1000000` must have an entry, zero for the empty ones.
-- `files` comes from the objects as GCS stores them: `gcloud storage ls --format=json -r 'gs://eth-logs/eth-log-warehouse/v1/**'` yields `size` and `md5_hash` (base64) per object; the key is the object path relative to the export root.
+  `blocks.last` is the export's **`export_end`** — the single block captured at the start of the extract script that bounds the logs materialization and the blocks export alike (see [docs/probe_2026-08.md](probe_2026-08.md)); for `v2` it is 25,864,358, the dataset head at materialization. Never derive it from the blocks export itself: the live blocks table can advance between the two steps, and `backfill blocks` trims what it loads to the manifest interval precisely so that a longer blocks export cannot widen coverage past the logs extract. Every partition from `first/1000000` to `last/1000000` must have an entry, zero for the empty ones.
+- `files` comes from the objects as GCS stores them: `gcloud storage ls --json -r 'gs://eth-logs/eth-log-warehouse/v2/**'` yields `size` and `md5Hash` (base64) per object (`--json`; the older `--format=json` flag was removed from the SDK); the key is the object path relative to the export root.
 
-Assemble the three into `manifest.json`, upload it next to the export so every copy carries it, and never edit it on the loading host. **`v1` has its manifest**: `gs://eth-logs/eth-log-warehouse/v1/manifest.json` (uploaded 2026-08-30; 26 partitions `000`–`025`, 402,266,375 logs, blocks 0–25,842,829, 5,629 files / 16.12 GB), so `gcloud storage cp -r gs://eth-logs/eth-log-warehouse/v1 ./data/` brings it along. The `v0-rehearsal` prefix deliberately has no manifest.
+Assembly is scripted: [`tools/export/make_manifest.py`](../tools/export/make_manifest.py) builds `manifest.json` from those inputs (its docstring carries the exact `bq`/`gcloud` commands); upload it next to the export so every copy carries it, and never edit it on the loading host. **`v2` has its manifest**: `gs://eth-logs/eth-log-warehouse/v2/manifest.json` (uploaded 2026-08-31; 26 partitions `000`–`025`, 402,634,739 logs, blocks 0–25,864,358, 5,626 parquet files / 16.13 GB), so the `cp -r` above brings it along. Superseded prefixes are deleted once their successor is loaded and verified in production (`v0-rehearsal` and `v1` were pruned on 2026-08-31): the bucket holds exactly one live prefix — the disaster-recovery source, ~$0.40/month at Standard class.
 
 
 ### 1.3 Run the backfill
@@ -214,3 +214,5 @@ When history must be regenerated (a new signature or shape rule, a corrupt expor
 - Cost and time of the 2026-08-28 run: **134 s**, 3,622 GB billed ≈ **$20.6 list, ≈ $14 after the free TiB**; set "Maximum bytes billed" to 4 TB as a hard stop before running.
 - Change the `bucket` DECLARE to a new version prefix (`v2`, …) rather than overwriting `v1`; keep the shape rules in the `WHERE` clause identical to `eventset.Keep`, or change both in the same PR.
 - Verify with the external-table round-trip (row count and distinct `(block_number, log_index)` equal) before loading.
+- Generate and upload the new prefix's `manifest.json` with [`tools/export/make_manifest.py`](../tools/export/make_manifest.py) (inputs and upload command in its docstring; `export_end` is the value the extract script SELECTs at the end).
+- Once the new prefix is loaded and verified in production, delete the superseded one — the bucket keeps exactly one live prefix, the disaster-recovery source (§1.2).
