@@ -40,7 +40,7 @@ Only confirmed blocks (at least `ethereum.confirmation_blocks` behind the tip) a
 | topic1 | bytea | 32 bytes or NULL when the log has fewer topics |
 | topic2 | bytea | same |
 | topic3 | bytea | same |
-| data | bytea | Raw data; empty (not NULL) for ERC-721 `Transfer` |
+| data | bytea | Raw data; empty (not NULL) for the 4-topic ERC-721 `Transfer`; the CryptoPunks 3-topic internal `Transfer` keeps its 32-byte ABI-encoded value |
 
 `PRIMARY KEY (block_number, log_index)`, `PARTITION BY RANGE (block_number)`.
 

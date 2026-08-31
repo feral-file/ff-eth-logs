@@ -27,7 +27,7 @@ The historical half of that traffic does not need a node at all. The warehouse h
 ## 4. In-scope capabilities
 
 - **Chain**: Ethereum mainnet (`eth_chainId` = 1).
-- **Events**: ERC-721 `Transfer` (4 topics), ERC-1155 `TransferSingle` / `TransferBatch` (4 topics) and `URI` (2 topics), EIP-4906 `MetadataUpdate` / `BatchMetadataUpdate` (1 topic), and CryptoPunks `PunkTransfer` / `Assign` / `PunkBought` from `0xb47e3cd837ddf8e4c57f05d70ab865de6e193bbb` only — the set and shapes the indexer's parsers accept (`internal/eventset`).
+- **Events**: ERC-721 `Transfer` (4 topics; any shape from CryptoPunks `0xb47e…3bbb`, whose 3-topic internal `Transfer` the indexer's owner scan depends on), ERC-1155 `TransferSingle` / `TransferBatch` (4 topics) and `URI` (2 topics), EIP-4906 `MetadataUpdate` / `BatchMetadataUpdate` (1 topic), and CryptoPunks `PunkTransfer` / `Assign` / `PunkBought` from `0xb47e3cd837ddf8e4c57f05d70ab865de6e193bbb` only — the set and shapes the indexer's parsers accept (`internal/eventset`).
 - **Methods**: `eth_getLogs`, `eth_blockNumber` (warehouse head), `eth_chainId`; `GET /health`.
 - **Full history**: genesis to the head (first stored log at block 937,821).
 - **Tail ingestion** with confirmation lag, bounded catch-up, dense-block receipts fallback, and shape rules identical to the backfill.
@@ -35,7 +35,7 @@ The historical half of that traffic does not need a node at all. The warehouse h
 
 ## 5. Out-of-scope capabilities
 
-- **ERC-20** — 3-topic `Transfer` logs share the ERC-721 signature and are not stored: every `Transfer` filter is answered from the 4-topic logs only, which is the vendor's answer minus the ERC-20 and pre-standard transfers (the vendor ignores topic position count, so no filter shape changes this — [api design](api_design.md)). Consumers that need ERC-20 transfers ask a node.
+- **ERC-20** — 3-topic `Transfer` logs share the ERC-721 signature and are not stored (the CryptoPunks contract's own internal `Transfer` is the one exception, kept in any shape for the indexer's corrupted-`PunkBought` repair): every `Transfer` filter is answered from the 4-topic logs plus that exception, which is the vendor's answer minus the ERC-20 and pre-standard transfers (the vendor ignores topic position count, so no filter shape changes this — [api design](api_design.md)). Consumers that need ERC-20 transfers ask a node.
 - **Non-NFT events** and any `topics[0]` outside the set — refused, not partially answered.
 - **State calls** — `eth_call`, `eth_getCode`, `eth_getTransactionReceipt`, `eth_getBlockByNumber` and every other method return `-32601`.
 - **Tip data** — nothing above the warehouse head; only `latest` resolves to the head, while `safe`, `finalized` and `pending` are refused (the head is only `confirmation_blocks` deep, so those tags fall through to a node — [api design](api_design.md)).
@@ -44,7 +44,7 @@ The historical half of that traffic does not need a node at all. The warehouse h
 
 ## 6. Success criteria
 
-- **Exactness on the stored set** — for an in-scope filter inside coverage, the response equals the vendor's response minus the documented never-stored shapes (ERC-20 / pre-standard `Transfer`s, nonstandard emitters, CryptoPunks-signature logs from other contracts); verified live on 2026-08-29 against Infura for owner scans, contract provenance, ERC-1155 and CryptoPunks filters (identical) and for a broad `Transfer` window (identical after removing the vendor's <4-topic logs), on backfilled and on tail-written blocks alike.
+- **Exactness on the stored set** — for an in-scope filter inside coverage, the response equals the vendor's response minus the documented never-stored shapes (ERC-20 / pre-standard `Transfer`s, nonstandard emitters, CryptoPunks-signature logs from other contracts); verified live on 2026-08-29 against Infura for owner scans, contract provenance, ERC-1155 and CryptoPunks filters (identical) and for a broad `Transfer` window (identical after removing the vendor's <4-topic logs), on backfilled and on tail-written blocks alike. **That evidence predates the 2026-08-30 amendment** that keeps the CryptoPunks contract's 3-topic `Transfer` (a v1 warehouse lacks those rows until re-exported and reloaded, and the indexer's capability probe refuses it until then — [operations §9](operations.md)); after the reload the criterion is re-validated by the same vendor diff with the punks-address `<4`-topic `Transfer`s kept on the vendor side, and specifically by block 3,919,706 (the probe block) matching on backfilled data and a post-amendment tail block matching on tail-ingested data.
 - **One query per walk** — a full-history owner scan or token provenance is a single `eth_getLogs` call served from indexed columns, not ~2,600 windows.
 - **Measured size** (probe of 2026-08-28, [docs/probe_2026-08.md](probe_2026-08.md)): **402,266,375** logs to block 25,842,829, modelled at **≈ 205 GB** in PostgreSQL (510 B/log all-in), growing **≈ 1.5 GB/month** (12-month average 2.9 M logs/month).
 - **Currency** — head within ~2 blocks + fetch latency of the tip in steady state; a restart resumes from the durable cursor without gaps.

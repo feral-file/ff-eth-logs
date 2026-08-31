@@ -212,7 +212,7 @@ make logs
 
 1. Point `ethereum.start_block` at a recent height for a local run without a backfill; set it back to `0` before the next start — with a cursor present the service refuses to start while it is set.
 2. Use `ethereum.ingestion_enabled=false` to iterate on the API against a loaded database without an RPC key.
-3. Compare answers with the vendor: the same `eth_getLogs` body sent to the vendor and to `:8545` must return identical arrays for an in-scope filter inside coverage **after removing the vendor's never-stored shapes** (`eventset.OmittedShapes`: for `Transfer`, its logs with fewer than four topics); a CryptoPunks filter pinned to the contract, or a `TransferSingle` filter, needs no filtering and must match unfiltered.
+3. Compare answers with the vendor: the same `eth_getLogs` body sent to the vendor and to `:8545` must return identical arrays for an in-scope filter inside coverage **after removing the vendor's never-stored shapes** (`eventset.OmittedShapes`: for `Transfer`, its logs with fewer than four topics **unless emitted by CryptoPunks `0xb47e…3bbb`**, which are stored in any shape and must be kept on the vendor side of the diff); a CryptoPunks filter pinned to the contract, or a `TransferSingle` filter, needs no filtering and must match unfiltered.
 4. `psql -c "SELECT * FROM ingest_cursor"` shows the head and when it last moved.
 5. Keep PostgreSQL running and restart only the binary during development.
 

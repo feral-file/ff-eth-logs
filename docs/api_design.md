@@ -68,7 +68,7 @@ What differs from the vendor is only the **stored set**: per signature, the ware
 
 | Signature | Never stored (a node returns them, the warehouse does not) |
 | --- | --- |
-| `Transfer` | logs with fewer than 4 topics — ERC-20 `Transfer`, pre-standard NFT transfers (CryptoKitties) |
+| `Transfer` | logs with fewer than 4 topics — ERC-20 `Transfer`, pre-standard NFT transfers (CryptoKitties) — **except** those emitted by CryptoPunks `0xb47e…3bbb`: its 3-topic internal `Transfer(seller, buyer, 1)` is stored in any shape, because it is the indexer's only trace of a corrupted `acceptBidForPunk` purchase (`PunkBought` with a zero indexed buyer) and the indexer probes block 3,919,706 for it before routing to a warehouse (ff-indexer-v2 #144) |
 | `TransferSingle`, `TransferBatch` | logs with fewer than 4 topics (malformed emitters) |
 | `MetadataUpdate`, `BatchMetadataUpdate` | logs with more than 1 topic (nonstandard emitters with indexed arguments) |
 | `URI` | logs with a topic count other than 2 |
@@ -102,7 +102,7 @@ An array of go-ethereum `types.Log` objects, `[]` (never `null`) when nothing ma
 
 - `blockHash` and `blockTimestamp` come from `eth_blocks`; `blockTimestamp` is always present, so a client needs no `eth_getBlockByNumber` for timestamps.
 - `removed` is always `false`: only confirmed blocks are stored.
-- `data` is `0x` for ERC-721 `Transfer`.
+- `data` is `0x` for the 4-topic ERC-721 `Transfer`; the retained CryptoPunks 3-topic internal `Transfer(seller, buyer, 1)` carries its unindexed `uint256` value as 32-byte ABI-encoded `data` (the vendor returns it the same way).
 
 ### 3.6 Result cap
 
@@ -112,7 +112,7 @@ Exceeding `rpc.max_results` (default 100,000) returns `-32000 query returned mor
 
 | Event | `topics[0]` | Stored shape |
 | --- | --- | --- |
-| ERC-721 `Transfer(address,address,uint256)` | `0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef` | exactly 4 topics |
+| ERC-721 `Transfer(address,address,uint256)` | `0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef` | exactly 4 topics — except from CryptoPunks `0xb47e3cd837ddf8e4c57f05d70ab865de6e193bbb`: any shape (its 3-topic internal `Transfer`) |
 | ERC-1155 `TransferSingle(address,address,address,uint256,uint256)` | `0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62` | 4 topics |
 | ERC-1155 `TransferBatch(address,address,address,uint256[],uint256[])` | `0x4a39dc06d4c0dbc64b70af90fd698a233a518aa5d07e595d983b8c0526c8f7fb` | 4 topics |
 | EIP-4906 `MetadataUpdate(uint256)` | `0xf8e1a15aba9398e019f0b49df1a4fde98ee17ae345cb5f6b5e2c27f5033e8ce7` | 1 topic |
@@ -122,7 +122,7 @@ Exceeding `rpc.max_results` (default 100,000) returns `-32000 query returned mor
 | CryptoPunks `Assign(address,uint256)` | `0x8a0e37b73a0d9c82e205d4d1a3ff3d0b57ce5f4d7bccf6bac03336dc101cb7ba` | same |
 | CryptoPunks `PunkBought(uint256,uint256,address,address)` | `0x58e5d5a525e3b40bc15abaa38b5882678db1ee68befd2f60bafe3a7fd06db9e3` | same |
 
-The stored shapes are the ones the indexer's parsers accept; a node holds more (3-topic ERC-20 and 1-topic pre-standard `Transfer`s, nonstandard `MetadataUpdate`/`URI` shapes, CryptoPunks-signature events from other contracts). An in-scope answer is therefore the vendor's answer minus those shapes and nothing else — for the Transfer family that means the ERC-20 and pre-standard logs a node would also return are absent; for the CryptoPunks signatures it means the logs other contracts emit under them are absent whatever the address selector says. Everything else (coverage, event set, tags) is a scope error for the vendor.
+The stored shapes are the ones the indexer's parsers accept; a node holds more (3-topic ERC-20 and 1-topic pre-standard `Transfer`s, nonstandard `MetadataUpdate`/`URI` shapes, CryptoPunks-signature events from other contracts). An in-scope answer is therefore the vendor's answer minus those shapes and nothing else — for the Transfer family that means the ERC-20 and pre-standard logs a node would also return are absent (the CryptoPunks contract's own 3-topic `Transfer` excepted: it is stored); for the CryptoPunks signatures it means the logs other contracts emit under them are absent whatever the address selector says. Everything else (coverage, event set, tags) is a scope error for the vendor.
 
 ## 4. What a routing client should do
 
