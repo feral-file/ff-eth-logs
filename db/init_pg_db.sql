@@ -40,13 +40,14 @@ BEGIN
     END LOOP;
 END $$;
 
--- Secondary indexes. Keep the four statements byte-identical to
+-- Secondary indexes. Keep the statements byte-identical to
 -- internal/logstore/schema.go (SecondaryIndexes): the backfill drops and
 -- recreates them from that list, and a test compares the two.
 CREATE INDEX IF NOT EXISTS eth_logs_t1 ON eth_logs (topic1, block_number) WHERE topic1 IS NOT NULL;
 CREATE INDEX IF NOT EXISTS eth_logs_t2 ON eth_logs (topic2, block_number) WHERE topic2 IS NOT NULL;
 CREATE INDEX IF NOT EXISTS eth_logs_t3 ON eth_logs (topic3, block_number) WHERE topic3 IS NOT NULL;
 CREATE INDEX IF NOT EXISTS eth_logs_addr ON eth_logs (address, block_number);
+CREATE INDEX IF NOT EXISTS eth_logs_addr_t3 ON eth_logs (address, topic3, block_number) WHERE topic3 IS NOT NULL;
 
 -- What the backfill loaded, per unit ("logs/part=NNN" or "blocks"): the
 -- fingerprint of that unit's manifest entries (file sizes + MD5s). A stage

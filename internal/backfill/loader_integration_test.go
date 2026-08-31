@@ -264,7 +264,7 @@ func TestLoaderEndToEnd(t *testing.T) {
 	assert.Equal(t, common.BigToHash(big.NewInt(12)), logs[1].BlockHash)
 
 	require.NoError(t, pool.QueryRow(ctx, `SELECT COUNT(*) FROM pg_indexes WHERE tablename = 'eth_logs'`).Scan(&n))
-	assert.Equal(t, 5, n, "PK + four secondary indexes recreated")
+	assert.Equal(t, 6, n, "PK + five secondary indexes recreated")
 
 	// Every stage is idempotent: a second run changes nothing.
 	require.NoError(t, l.Logs(ctx))
