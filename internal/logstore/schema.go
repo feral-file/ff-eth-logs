@@ -24,8 +24,14 @@ type IndexDef struct {
 // query shape and nothing speculative:
 //   - owner scans (owner in topic 1 / 2 / 3), block range in the key so a
 //     bounded scan never touches the heap for out-of-range rows;
-//   - per-contract provenance (address), which also serves the ERC-721
-//     tokenID-in-topic3 lookups because the planner can pick either.
+//   - per-contract provenance (address), for walks with no token topic
+//     (ERC-1155, whose token id lives in data);
+//   - ERC-721 per-token provenance (address, topic3): measured in prod
+//     (2026-08-31), neither single-column index serves it — a small token id
+//     matches every "token N" log of every contract via eth_logs_t3, and a
+//     large collection matches its whole history via eth_logs_addr, so the
+//     planner filters megarows either way (20-60 s per genesis-to-head walk,
+//     timing out the indexer's provenance backfill into vendor fall-through).
 //
 // No index on tx_hash: the only tx lookup in the indexer is bounded by
 // address + block. No index on topic0 alone: every served query carries a
@@ -35,6 +41,7 @@ var SecondaryIndexes = []IndexDef{
 	{Name: "eth_logs_t2", DDL: "CREATE INDEX eth_logs_t2 ON eth_logs (topic2, block_number) WHERE topic2 IS NOT NULL"},
 	{Name: "eth_logs_t3", DDL: "CREATE INDEX eth_logs_t3 ON eth_logs (topic3, block_number) WHERE topic3 IS NOT NULL"},
 	{Name: "eth_logs_addr", DDL: "CREATE INDEX eth_logs_addr ON eth_logs (address, block_number)"},
+	{Name: "eth_logs_addr_t3", DDL: "CREATE INDEX eth_logs_addr_t3 ON eth_logs (address, topic3, block_number) WHERE topic3 IS NOT NULL"},
 }
 
 // PartitionName is the eth_logs partition holding block n.
