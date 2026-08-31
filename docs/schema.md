@@ -119,6 +119,7 @@ Levers if a future measurement comes in high, cheapest first: `topic0` as a `sma
 Migrations live in `db/migrations/` as sequentially numbered `NNN.sql` and are mirrored into `db/init_pg_db.sql`, which stays the complete schema for a fresh database and for the integration tests.
 
 - `001.sql` — initial schema; identical to `db/init_pg_db.sql` at this version (`\ir ../init_pg_db.sql`, resolved relative to the migration file, so `psql -f db/migrations/001.sql` works from any directory). Apply one or the other on a fresh database.
+- `002_erc1155_id_index.sql` — the `eth_logs_erc1155_id` partial index. On a populated warehouse, run it (`psql -f`) before deploying the image whose `init_pg_db.sql` carries the same index, so the index is built `CONCURRENTLY` per partition instead of non-concurrently during the deploy. Idempotent and a no-op on a fresh database (init already built it). It gates on the parent index being valid.
 
 **Deployment ordering rule**: run a migration before deploying the binary that depends on it; the code has no schema bootstrap of its own beyond on-demand partitions. A migration that rebuilds an `eth_logs` index on the full table is a long, write-blocking operation — schedule it with ingestion stopped and see the `maintenance_work_mem` note in [operations](operations.md).
 

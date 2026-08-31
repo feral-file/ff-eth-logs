@@ -204,9 +204,15 @@ tail writes for the duration.
 
 So for a populated warehouse the index is built **out-of-band and concurrently,
 before the image that carries the new DDL is deployed** — then the `IF NOT
-EXISTS` is a no-op and the deploy neither locks nor stops ingestion. `eth_logs`
-is partitioned, so `CREATE INDEX CONCURRENTLY` cannot run on the parent
-directly; build each leaf concurrently and attach it:
+EXISTS` is a no-op and the deploy neither locks nor stops ingestion. Each such
+index ships a versioned migration under `db/migrations/` that performs exactly
+this rollout and gates on the parent index being valid; run it with `psql -f`
+before the deploy (e.g. `db/migrations/002_erc1155_id_index.sql` for
+`eth_logs_erc1155_id`). It is idempotent and order-independent — a no-op on a
+fresh database where `init_pg_db.sql` already built the index. The migration
+follows the pattern below; `eth_logs` is partitioned, so `CREATE INDEX
+CONCURRENTLY` cannot run on the parent directly — build each leaf concurrently
+and attach it:
 
 ```bash
 set -euo pipefail
@@ -231,11 +237,13 @@ $PSQL -tAc "SELECT indisvalid FROM pg_index WHERE indexrelid = '<name>'::regclas
 
 Run it with `statement_timeout = 0` (a large partition takes minutes) and expect
 a few minutes per dense partition on the 2-vCPU host; ingestion keeps running
-throughout. `eth_logs_addr_t3` (#7) and `eth_logs_erc1155_id` were both rolled
-out this way. This is deliberately not a `db/migrations/` entry: the DDL is the
-same `IF NOT EXISTS` statement `init_pg_db.sql` already carries, and the repo
-has no migration runner — the ordering guarantee here is operational (build
-before deploy), not a versioned migration.
+throughout. `eth_logs_erc1155_id` ships this as `db/migrations/002_erc1155_id_index.sql`
+(`eth_logs_addr_t3`, #7, predates the pattern and was rolled out by hand). The
+repo has no automatic migration runner, so the migration is applied by hand
+(`psql -f`) before the deploy and its ordering guarantee is operational (build
+before deploy); it exists as a recorded, re-runnable artifact with the
+validity gate, not only as prose here. `init_pg_db.sql` keeps the plain
+`IF NOT EXISTS` statement for fresh databases.
 
 ## 8. Backfill on the deployed host
 

@@ -138,7 +138,7 @@ The file is idempotent (`IF NOT EXISTS` throughout) and creates `eth_blocks`, `e
 
 ### Migrations
 
-Migrations live in `db/migrations/` as `NNN.sql` and are mirrored into `db/init_pg_db.sql`; `001.sql` is the initial schema and simply includes the init file. Apply with `psql -f`. Run a migration before deploying the code that depends on it. The six `CREATE INDEX` statements must stay byte-identical to `logstore.SecondaryIndexes` — the backfill drops and recreates them from that list, and `TestSchemaMatchesInit` compares the two.
+Migrations live in `db/migrations/` as `NNN.sql`; their end state is mirrored into `db/init_pg_db.sql` (the fresh-database schema). `001.sql` is the initial schema (it includes the init file); `002_erc1155_id_index.sql` builds the `eth_logs_erc1155_id` index `CONCURRENTLY` per partition for a populated warehouse (a no-op on a fresh one). Apply with `psql -f` in autocommit (a `CONCURRENTLY` migration cannot run inside a transaction). Run a migration before deploying the code that depends on it. The six `CREATE INDEX` statements must stay byte-identical to `logstore.SecondaryIndexes` — the backfill drops and recreates them from that list, and `TestSchemaMatchesInit` compares the two.
 
 ### Reset Database
 

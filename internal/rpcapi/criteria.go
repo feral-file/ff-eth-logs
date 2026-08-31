@@ -41,12 +41,14 @@ type FilterCriteria struct {
 	ToBlock   *big.Int
 	Addresses []common.Address
 	Topics    [][]common.Hash
-	// ERC1155ID, when set, restricts ERC-1155 TransferSingle logs to the one
-	// token whose id — the first 32-byte word of data — equals it; logs of
-	// every other signature in the same filter pass through unaffected. It is a
-	// warehouse-specific extension a standard node ignores, so it only travels
-	// on the warehouse leg of a routing client; the vendor filter stays
-	// standard eth_getLogs. Absent (nil) reproduces today's behavior exactly.
+	// ERC1155ID, when set, restricts the ERC-1155 token-scoped signatures to one
+	// token id, matching each where the id is carried: TransferSingle by data
+	// word 0, URI by topic1. So a mixed [TransferSingle, URI] filter returns
+	// only that token's transfers and only that token's URI updates. A signature
+	// with no scalar token-id column (e.g. TransferBatch) passes through
+	// unfiltered. It is a warehouse-specific extension a standard node ignores,
+	// so it only travels on the warehouse leg of a routing client; the vendor
+	// filter stays standard eth_getLogs. Absent (nil) reproduces prior behavior.
 	ERC1155ID *common.Hash
 }
 
