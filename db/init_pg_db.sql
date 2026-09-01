@@ -48,6 +48,7 @@ CREATE INDEX IF NOT EXISTS eth_logs_t2 ON eth_logs (topic2, block_number) WHERE 
 CREATE INDEX IF NOT EXISTS eth_logs_t3 ON eth_logs (topic3, block_number) WHERE topic3 IS NOT NULL;
 CREATE INDEX IF NOT EXISTS eth_logs_addr ON eth_logs (address, block_number);
 CREATE INDEX IF NOT EXISTS eth_logs_addr_t3 ON eth_logs (address, topic3, block_number) WHERE topic3 IS NOT NULL;
+CREATE INDEX IF NOT EXISTS eth_logs_erc1155_id ON eth_logs (address, (substring(data from 1 for 32)), block_number) WHERE topic0 = '\xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62'::bytea;
 
 -- What the backfill loaded, per unit ("logs/part=NNN" or "blocks"): the
 -- fingerprint of that unit's manifest entries (file sizes + MD5s). A stage

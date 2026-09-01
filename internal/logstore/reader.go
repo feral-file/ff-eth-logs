@@ -9,6 +9,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/feral-file/ff-eth-logs/internal/eventset"
 )
 
 // Query is a resolved eth_getLogs filter: an inclusive block range plus
@@ -29,6 +31,11 @@ type Query struct {
 	// that the vendor answers. A position with values requires the topic to
 	// exist and match, which a NULL column never does.
 	Topics [][]common.Hash
+	// ERC1155ID restricts the ERC-1155 token-scoped signatures to one token id:
+	// TransferSingle by data word 0, URI by topic1 (the two places the id is
+	// carried). Any other requested signature (e.g. TransferBatch) passes
+	// through. nil imposes nothing. See rpcapi.FilterCriteria.ERC1155ID.
+	ERC1155ID *common.Hash
 }
 
 // ErrTooManyResults is returned when a query would exceed the caller's limit.
@@ -149,6 +156,18 @@ func filterLogs(ctx context.Context, db rowQuerier, q Query, limit int) ([]types
 	return logs, nil
 }
 
+// transferSingleTopic0SQL is eventset.TransferSingle as a fixed SQL bytea
+// literal, e.g. '\xc3d5…'::bytea. The eth_logs_erc1155_id partial index has
+// predicate topic0 = <TransferSingle literal>; a query must repeat that literal
+// for the planner to prove index eligibility. A bound parameter ($n) would not:
+// pgx caches prepared statements, and once PostgreSQL switches a statement to a
+// generic plan the parameter value is unknown at plan time, so topic0 = $n
+// cannot imply the partial predicate and the index becomes ineligible — the
+// full-contract scan this feature exists to avoid. The value is a trusted
+// compile-time constant (not user input), so inlining it is injection-safe;
+// TestBuildFilterTransferSingleLiteral pins it to eventset.TransferSingle.
+var transferSingleTopic0SQL = fmt.Sprintf("'\\x%x'::bytea", eventset.TransferSingle.Bytes())
+
 // buildFilter renders q as SQL with positional parameters. The WHERE clause
 // is assembled from fixed fragments; user data only ever travels as
 // parameters, never in the SQL text.
@@ -171,6 +190,52 @@ func buildFilter(q Query, limit int) (string, []any) {
 		col := fmt.Sprintf("l.topic%d", i)
 		if len(sub) == 0 {
 			continue // wildcard: no clause, the topic need not exist
+		}
+		if i == 0 && q.ERC1155ID != nil {
+			// Restrict the ERC-1155 token-scoped signatures to one token id,
+			// written as an explicit top-level OR of clean indexable arms. The id
+			// lives in a different place per signature: data word 0 for
+			// TransferSingle (served by the partial expression index
+			// eth_logs_erc1155_id), topic1 for URI (served by eth_logs_t1). Only
+			// this explicit form lets the planner BitmapOr those indexes per
+			// partition; the "topic0 <> TransferSingle OR substring = id" filter
+			// it replaced hid the OR behind topic0 = ANY(...) and measured a
+			// full-contract scan (>120 s vs 127 ms) for a mixed
+			// [[TransferSingle, URI]] query on a large contract. Any other
+			// requested signature (TransferBatch, whose ids are a data array, not
+			// a fixed word) has no id column, so it passes through unfiltered as
+			// its own arm — the same set a node returns for it.
+			var others [][]byte
+			hasTS, hasURI := false, false
+			for _, h := range sub {
+				switch h {
+				case eventset.TransferSingle:
+					hasTS = true
+				case eventset.URI:
+					hasURI = true
+				default:
+					others = append(others, h.Bytes())
+				}
+			}
+			var arms []string
+			if hasTS {
+				// topic0 as a fixed literal (see transferSingleTopic0SQL) so the
+				// partial index stays eligible under a generic prepared plan; the
+				// id stays parameterized.
+				arms = append(arms, fmt.Sprintf("(l.topic0 = %s AND substring(l.data from 1 for 32) = %s)",
+					transferSingleTopic0SQL, arg(q.ERC1155ID.Bytes())))
+			}
+			if hasURI {
+				arms = append(arms, fmt.Sprintf("(l.topic0 = %s AND l.topic1 = %s)",
+					arg(eventset.URI.Bytes()), arg(q.ERC1155ID.Bytes())))
+			}
+			if len(others) > 0 {
+				arms = append(arms, fmt.Sprintf("l.topic0 = ANY(%s::bytea[])", arg(others)))
+			}
+			if len(arms) > 0 {
+				where = append(where, "("+strings.Join(arms, " OR ")+")")
+			}
+			continue
 		}
 		vals := make([][]byte, len(sub))
 		for j, h := range sub {
